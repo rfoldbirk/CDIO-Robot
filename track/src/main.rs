@@ -10,6 +10,7 @@ struct Mark {
     y: u32,
     avg: Rgb<u8>,
     color: Color,
+    tbd: bool, // to be deleted;
 }
 
 #[derive(Debug, PartialEq)]
@@ -53,6 +54,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut marks: Vec<Mark> = Vec::new();
 
+    // mark everything that might be a ball!
     for x in 0..width / INC {
         for y in 0..height / INC {
             let x = x * INC;
@@ -61,6 +63,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let avg = get_avg_color_in_pixel_field(&state, x, y, INC);
             let Rgb([r, g, b]) = avg;
 
+            let delta = color_diff(&state, avg);
+            if delta < 8000 { continue }
             // tjek for hvide bolde
             if r > 200 && g > 200 && b > 200 {
                 marks.push(Mark {
@@ -68,43 +72,32 @@ fn main() -> Result<(), Box<dyn Error>> {
                     y,
                     color: Color::White,
                     avg,
+                    tbd: false,
                 });
+            }
+            else if r > 190 && b < 140 {
+                marks.push(Mark { x, y, avg, color: Color::Orange, tbd: false });
             }
 
             // draw_rectangle(&mut img, x, y, Rgb([200, 255, 200]));
         }
     }
 
-    let mut c = 0;
-    let target = 17;
 
     for mark in &mut marks {
-        c += 1;
-        // if c != target { continue }
-        mark.color = Color::Selected;
-        break;
-    }
-
-    c = 0;
-
-
-
-    for mark in &mut marks {
-        c+=1;
-        // if c != target { continue }
-
+        // break;
         // find centrum og gå ned
         // let dist_bot = go_find_edge(&img, mark, (0, 1));
         let dist_top = calc_dist_to_edge(&mut state, mark, Up);
         let dist_bot = calc_dist_to_edge(&mut state, mark, Down);
 
-        println!("{dist_top:?}, {dist_bot:?}");
+        // println!("{dist_top:?}, {dist_bot:?}");
 
         if let (Some(dist_bot), Some(dist_top)) = (dist_bot, dist_top) {
-            println!("top: {dist_top}, bot: {dist_bot}");
+            // println!("top: {dist_top}, bot: {dist_bot}");
             let new_y = dist_bot - dist_top;
 
-            let extra_y = (new_y * (INC as i32)/4);
+            let extra_y = new_y * (INC as i32)/4;
 
             if extra_y < 0 {
                 mark.y -= extra_y.abs() as u32;
@@ -113,15 +106,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 mark.y += extra_y as u32;
             }
         }
+        else {
+            mark.tbd = true;
+        }
 
         let dist_right = calc_dist_to_edge(&mut state, mark, Right);
         let dist_left = calc_dist_to_edge(&mut state, mark, Left);
 
         if let (Some(dist_right), Some(dist_left)) = (dist_right, dist_left) {
-            println!("right: {dist_right}, left: {dist_left}");
+            // println!("right: {dist_right}, left: {dist_left}");
             let new_x = dist_right - dist_left;
 
-            let extra_x = (new_x * (INC as i32)/4);
+            let extra_x = new_x * (INC as i32)/4;
             if extra_x < 0 {
                 mark.x -= extra_x.abs() as u32;
             }
@@ -129,15 +125,19 @@ fn main() -> Result<(), Box<dyn Error>> {
                 mark.x += extra_x as u32;
             }
         }
+        else {
+            mark.tbd = true;
+        }
 
-        mark.color = Color::Selected;
+        // mark.color = Color::Selected;
 
         // break;
     }
 
 
     for mark in &marks {
-        if mark.color != Color::Selected { continue }
+        if mark.tbd { continue }
+        // if mark.color != Color::Selected { continue }
         // tegn
         draw_rectangle(
             &mut state,
@@ -183,16 +183,19 @@ fn calc_dist_to_edge(state: &mut State, mark: &Mark, dir: Direction) -> Option<i
         let avg = get_avg_color_in_pixel_field(state, x, y, INC / res);
         let delta = color_diff(state, avg);
 
-        println!("{dir:?}: delta: {delta}");
+        // println!("{dir:?}: delta: {delta}");
 
         if delta < 7500 {
+            if i == 0 {
+                return None;
+            }
             return Some(i as i32)
         }
 
         if i == 0 {
             continue;
         }
-        draw_rectangle_with_size(state, x, y, Rgb([100, 100, 255]), INC / 2);
+        // draw_rectangle_with_size(state, x, y, Rgb([100, 100, 255]), INC / 2);
     }
 
     // panic!("Should have found an edge? {mark:#?} {dir:#?}")
@@ -215,8 +218,20 @@ fn get_avg_color_in_pixel_field_wh(
     let mut g_sum = 0;
     let mut b_sum = 0;
 
-    for x in sx..sx + width {
-        for y in sy..sy + height {
+    let w = if sx+width >= img.dimensions().0 {
+        img.dimensions().0-2
+    } else {
+        sx+width
+    };
+
+    let h = if sy+height >= img.dimensions().1 {
+        img.dimensions().1-2
+    } else {
+        sy+height
+    };
+
+    for x in sx..w {
+        for y in sy..h {
             let Rgb([r, g, b]) = img.get_pixel(x, y);
             r_sum += *r as u32;
             g_sum += *g as u32;
