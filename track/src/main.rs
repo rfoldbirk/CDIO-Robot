@@ -169,7 +169,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 
     let mut i = 0;
-    let target = 13;
+    let target = 27;
 
     for mark in &mut marks {
         i += 1;
@@ -186,8 +186,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         mark.x += (dist_l.0 - dist_l.1) * INC/4;
         mark.y += (dist.1 - dist.0) * INC/4;
 
-        let diag = edge(&mut state, mark, Diagonal, true);
-        let anti_diag = edge(&mut state, mark, AntiDiagonal, true);
+        let diag = edge(&mut state, mark, Diagonal, false);
+        let anti_diag = edge(&mut state, mark, AntiDiagonal, false);
 
         println!("diag: {} {}", diag.0, diag.1);
         println!("anti: {} {}", anti_diag.0, anti_diag.1);
@@ -238,7 +238,8 @@ fn edge(state: &mut State, mark: &Mark, dir: Direction, draw: bool) -> (i32, i32
     let pos = (mark.x as i32, mark.y as i32);
 
     let inc = (INC as i32) / 2;
-    let dir = dir.vec();
+    let d = dir;
+    let dir = d.vec();
     let dir = (dir.0 * inc, dir.1 * inc);
 
     let mut r = (0, 0);
@@ -254,9 +255,9 @@ fn edge(state: &mut State, mark: &Mark, dir: Direction, draw: bool) -> (i32, i32
         let n_avg = get_avg_color_in_pixel_field(state, neg_pos.0, neg_pos.1, INC / 2);
         let nda = color_diff(state, n_avg);
 
-        if draw { println!("up: {da}, down: {nda}") }
+        if draw { println!("({d:?}): up: {da}, down: {nda}") }
 
-        let lim = 4458;
+        let lim = 8022;
 
         if da > lim && s.0 {
             r.0 += 1;
