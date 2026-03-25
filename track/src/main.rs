@@ -31,11 +31,9 @@ use Direction::*;
 #[derive(Debug)]
 enum Direction {
     Up,
-    Down,
     Right,
     Diagonal,
     AntiDiagonal,
-    Left,
 }
 
 impl Direction {
@@ -50,15 +48,6 @@ impl Direction {
             _ => panic!("lad vær")
         }
     }
-
-    // fn offset(&self) -> (i32, i32) {
-    //     match self {
-    //         Up => (INC/4, 1),
-    //         Right => (0, INC/4),
-    //         Diagonal => (1, 1),
-    //         _ => panic!("lad vær")
-    //     }
-    // }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -104,69 +93,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             else if r > 190 && g > 100 && b < 140 {
                 marks.push(Mark { x, y, avg, color: Color::Orange, tbd: false });
             }
-
-            // draw_rectangle(&mut img, x, y, Rgb([200, 255, 200]));
         }
     }
-
-
-    for mark in &mut marks {
-        // break;
-        // let dist = edge(&mut state, mark, Up);
-        // println!("dist: {} {}", dist.0, dist.1);
-
-        // break;
-        // //
-        // //
-        // // find centrum og gå ned
-        // // let dist_bot = go_find_edge(&img, mark, (0, 1));
-        // let dist_top = calc_dist_to_edge(&mut state, mark, Up);
-        // let dist_bot = calc_dist_to_edge(&mut state, mark, Down);
-
-        // println!("{dist_top:?}, {dist_bot:?}");
-
-
-        // if let (Some(dist_bot), Some(dist_top)) = (dist_bot, dist_top) {
-        //     // println!("top: {dist_top}, bot: {dist_bot}");
-        //     let new_y = dist_bot - dist_top;
-
-        //     let extra_y = new_y * (INC as i32)/4;
-
-        //     if extra_y < 0 {
-        //         mark.y -= extra_y.abs() as u32;
-        //     }
-        //     else {
-        //         mark.y += extra_y as u32;
-        //     }
-        // }
-        // else {
-        //     mark.tbd = true;
-        // }
-
-        // let dist_right = calc_dist_to_edge(&mut state, mark, Right);
-        // let dist_left = calc_dist_to_edge(&mut state, mark, Left);
-
-        // if let (Some(dist_right), Some(dist_left)) = (dist_right, dist_left) {
-        //     // println!("right: {dist_right}, left: {dist_left}");
-        //     let new_x = dist_right - dist_left;
-
-        //     let extra_x = new_x * (INC as i32)/4;
-        //     if extra_x < 0 {
-        //         mark.x -= extra_x.abs() as u32;
-        //     }
-        //     else {
-        //         mark.x += extra_x as u32;
-        //     }
-        // }
-        // else {
-        //     mark.tbd = true;
-        // }
-
-        // mark.color = Color::Selected;
-
-        // break;
-    }
-
 
     let mut i = 0;
     let target = 27;
@@ -198,20 +126,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         if dl >= adl*2 || adl >= dl*2 { mark.tbd = true }
 
-        // if diag.0 + diag.1 > 5 { mark.tbd = true }
-        // println!("diag: {} {}", diag.0, diag.1);
-        // println!("anti_diag: {} {}", anti_diag.0, anti_diag.1);
-
-
-        // println!("dist: {} {}", dist.0, dist.1);
-
-        // break;
     }
 
     for mark in &marks {
         if mark.tbd { continue }
-        // if mark.color != Color::Selected { continue }
-        // tegn
         draw_rectangle(
             &mut state,
             mark.x,
@@ -222,8 +140,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Color::Selected => Rgb([255, 220, 220]),
             },
         );
-
-        // break;
     }
 
 
@@ -287,43 +203,6 @@ fn color_diff(state: &State, color: Rgb<u8>) -> u32 {
     let delta_g = color.0[1].abs_diff(state.global_avg.0[1]);
     let delta_b = color.0[2].abs_diff(state.global_avg.0[2]);
     (delta_r as u32).pow(2) + (delta_g as u32).pow(2) + (delta_b as u32).pow(2)
-}
-
-fn calc_dist_to_edge(state: &mut State, mark: &Mark, dir: Direction) -> Option<i32> {
-    let res = 2;
-
-    for i in 0..10 {
-        let x = match dir {
-            Right => mark.x + INC/res * i,
-            Left => mark.x - INC/res * i + INC/res,
-            _ => mark.x + INC / (res*2),
-        };
-        let y = match dir {
-            Up => mark.y - INC / res * i + INC/res,
-            Down => mark.y + INC / res * i,
-            _ => mark.y + INC/(res*2),
-        };
-
-        let avg = get_avg_color_in_pixel_field(state, x, y, INC / res);
-        let delta = color_diff(state, avg);
-
-        // println!("{dir:?}: delta: {delta}");
-
-        if delta < 7500 {
-            if i == 0 {
-                return None;
-            }
-            return Some(i as i32)
-        }
-
-        if i == 0 {
-            continue;
-        }
-        // draw_rectangle_with_size(state, x, y, Rgb([100, 100, 255]), INC / 2);
-    }
-
-    // panic!("Should have found an edge? {mark:#?} {dir:#?}")
-    None
 }
 
 
