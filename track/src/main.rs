@@ -17,7 +17,6 @@ struct Mark {
 enum Color {
     White,
     Orange,
-    Selected,
 }
 
 #[derive(Debug)]
@@ -33,7 +32,7 @@ enum Direction {
     Up,
     Right,
     Diagonal,
-    AntiDiagonal,
+    OtherDiagonal,
 }
 
 impl Direction {
@@ -43,7 +42,7 @@ impl Direction {
             // Down => (0, 1),
             Right => (1, 0),
             Diagonal => (-1, -1),
-            AntiDiagonal => (1, -1),
+            OtherDiagonal => (1, -1),
             // Left => (-1, 0),
             _ => panic!("lad vær")
         }
@@ -54,7 +53,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let now = std::time::Instant::now();
     let img_path = env::args()
         .nth(1)
-        .unwrap_or_else(|| "images/12.jpg".to_string());
+        .unwrap_or_else(|| "images/14.jpg".to_string());
+
+    let wr: u8 = env::args().nth(2).unwrap_or("200".to_string()).parse().unwrap_or(200);
+    let wg: u8 = env::args().nth(3).unwrap_or("200".to_string()).parse().unwrap_or(200);
+    let wb: u8 = env::args().nth(4).unwrap_or("200".to_string()).parse().unwrap_or(200);
+    let or: u8 = env::args().nth(5).unwrap_or("190".to_string()).parse().unwrap_or(190);
+    let og: u8 = env::args().nth(6).unwrap_or("100".to_string()).parse().unwrap_or(100);
+    let ob: u8 = env::args().nth(7).unwrap_or("140".to_string()).parse().unwrap_or(140);
+
+    println!("input: wr={wr}, wg={wg}, wb={wb}, or={or}, og={og}, ob={ob}");
 
     let dyn_img = ImageReader::open(&img_path)?.decode()?;
     let og_img: RgbImage = dyn_img.to_rgb8();
@@ -81,7 +89,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             let delta = color_diff(&state, avg);
             if delta < 8000 { continue }
             // tjek for hvide bolde
-            if r > 200 && g > 200 && b > 200 {
+            // if r > 200 && g > 200 && b > 200 {
+            if r > wr && g > wg && b > wb {
                 marks.push(Mark {
                     x,
                     y,
@@ -90,42 +99,30 @@ fn main() -> Result<(), Box<dyn Error>> {
                     tbd: false,
                 });
             }
-            else if r > 190 && g > 100 && b < 140 {
+            // else if r > 190 && g > 100 && b < 140 {
+            else if r > or && g > og && b < ob {
                 marks.push(Mark { x, y, avg, color: Color::Orange, tbd: false });
             }
         }
     }
 
-    let mut i = 0;
-    let target = 27;
-
     for mark in &mut marks {
-        i += 1;
-        // if i != target { mark.tbd = true; continue; }
-        // break;
         let dist = edge(&mut state, mark, Up, true);
         let dist_l = edge(&mut state, mark, Right, true);
-
-        println!("up: {}-{}", dist.0, dist.1);
-        println!("right: {}-{}", dist_l.0, dist_l.1);
-
 
         // realign
         mark.x += (dist_l.0 - dist_l.1) * INC/4;
         mark.y += (dist.1 - dist.0) * INC/4;
 
         let diag = edge(&mut state, mark, Diagonal, false);
-        let anti_diag = edge(&mut state, mark, AntiDiagonal, false);
+        let anti_diag = edge(&mut state, mark, OtherDiagonal, false);
 
-        println!("diag: {} {}", diag.0, diag.1);
-        println!("anti: {} {}", anti_diag.0, anti_diag.1);
         if diag.0 <= 1 || diag.1 <= 1 { mark.tbd = true }
         if anti_diag.0 <= 1 || anti_diag.1 <= 1 { mark.tbd = true }
         let dl = diag.0 + diag.1;
         let adl = anti_diag.0 + anti_diag.1;
 
         if dl >= adl*2 || adl >= dl*2 { mark.tbd = true }
-
     }
 
     for mark in &marks {
@@ -137,7 +134,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             match mark.color {
                 Color::White => Rgb([200, 255, 200]),
                 Color::Orange => Rgb([255, 165, 0]),
-                Color::Selected => Rgb([255, 220, 220]),
             },
         );
     }

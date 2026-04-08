@@ -1,0 +1,106 @@
+<html>
+    <head>
+        <title>Robot - Control Panel</title>
+    </head>
+    <body>
+        <div style="display: flex">
+            <div>
+                <p>Calibrate white:</p>
+                <div>
+                    <input oninput="update_label('wr')" type="range" id="wr" name="wr" min="0" max="255" />
+                    <label>red:</label>
+                    <label for="wr"></label>
+                </div>
+                <div>
+                    <input oninput="update_label('wg')" type="range" id="wg" name="wg" min="0" max="255" />
+                    <label>green:</label>
+                    <label for="wg"></label>
+                </div>
+                <div>
+                    <input oninput="update_label('wb')" type="range" id="wb" name="wb" min="0" max="255" />
+                    <label>blue:</label>
+                    <label for="wb"></label>
+                </div>
+            </div>
+            <div>
+                <p>Calibrate orange:</p>
+                <div>
+                    <input oninput="update_label('or')" type="range" id="or" name="or" min="0" max="255" />
+                    <label>red:</label>
+                    <label for="or"></label>
+                </div>
+                <div>
+                    <input oninput="update_label('og')" type="range" id="og" name="og" min="0" max="255" />
+                    <label>green:</label>
+                    <label for="og"></label>
+                </div>
+                <div>
+                    <input oninput="update_label('ob')" type="range" id="ob" name="ob" min="0" max="255" />
+                    <label>blue:</label>
+                    <label for="ob"></label>
+                </div>
+            </div>
+        </div>
+
+        <button onclick="reset()">Reset</button>
+
+        <br />
+        <br />
+
+        <img width="900" alt="billede" />
+
+        <script>
+            function update_label(label) {
+                let value = document.getElementById(label).value;
+                document.querySelector(`label[for="${label}"]`).textContent = value;
+
+                // save i localStorage
+                localStorage.setItem(label, value);
+
+                go();
+            }
+
+            function load_calibration_values() {
+                let label_colors = ["w", "o"];
+                let label_types = ["r", "g", "b"];
+                let defaults = [200, 200, 200, 190, 100, 140];
+
+                let i = 0;
+                for (const color of label_colors) {
+                    for (const type of label_types) {
+                        const value = localStorage.getItem(`${color}${type}`) || defaults[i];
+                        document.querySelector(`label[for="${color}${type}"]`).textContent = value;
+                        document.getElementById(`${color}${type}`).value = value;
+                        i++;
+                    }
+                }
+            }
+
+            async function go() {
+                let wr = document.getElementById("wr").value;
+                let wg = document.getElementById("wg").value;
+                let wb = document.getElementById("wb").value;
+                let or = document.getElementById("or").value;
+                let og = document.getElementById("og").value;
+                let ob = document.getElementById("ob").value;
+
+                let res = await fetch(`/go?wr=${wr}&wg=${wg}&wb=${wb}&or=${or}&og=${og}&ob=${ob}`);
+
+                let img = await fetch("/latest.png");
+
+                img.blob().then((blob) => {
+                    let url = URL.createObjectURL(blob);
+                    document.querySelector("img").src = url;
+                });
+            }
+
+            function reset() {
+                localStorage.clear();
+                load_calibration_values();
+            }
+
+            load_calibration_values();
+            go(); // load the image instantly
+        </script>
+    </body>
+</html>
