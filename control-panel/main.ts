@@ -7,9 +7,13 @@ app.get("/", (req, res) => {
     res.sendFile(process.cwd() + "/public/index.html");
 });
 
+app.get("/style.css", (req, res) => {
+    res.sendFile(process.cwd() + "/public/style.css");
+});
+
 app.get("/go", (req, res) => {
-    const { wr, wg, wb, or, og, ob } = req.query;
-    let a = spawn("../track/target/release/track", ["../track/images/14.jpg", `${wr}`, `${wg}`, `${wb}`, `${or}`, `${og}`, `${ob}`]);
+    const { wr, wg, wb, or, og, ob, wp, op } = req.query;
+    let a = spawn("../analyzer/target/release/track-analyzer", ["../analyzer/images/14.jpg", `${wr}`, `${wg}`, `${wb}`, `${or}`, `${og}`, `${ob}`, `${wp}`, `${op}`]);
 
     let failsafe = setTimeout(() => {
         res.send({ok: false})
@@ -23,6 +27,10 @@ app.get("/go", (req, res) => {
             res.send({ ok: true, time })
         }
     });
+
+    a.stderr.on("data", (data) => {
+        console.log(`data: ${data}`)
+    })
 });
 
 app.get("/latest.png", (req, res) => {

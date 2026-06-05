@@ -298,7 +298,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "track"
+name = "track-analyzer"
 version = "0.1.0"
 dependencies = [
  "image",

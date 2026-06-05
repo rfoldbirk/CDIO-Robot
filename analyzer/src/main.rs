@@ -61,8 +61,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     let or: u8 = env::args().nth(5).unwrap_or("190".to_string()).parse().unwrap_or(190);
     let og: u8 = env::args().nth(6).unwrap_or("100".to_string()).parse().unwrap_or(100);
     let ob: u8 = env::args().nth(7).unwrap_or("140".to_string()).parse().unwrap_or(140);
+    // precision values (unøjagtigheder)
+    let wp: u8 = env::args().nth(8).unwrap_or("10".to_string()).parse().unwrap_or(10);
+    let op: u8 = env::args().nth(9).unwrap_or("10".to_string()).parse().unwrap_or(10);
 
-    println!("input: wr={wr}, wg={wg}, wb={wb}, or={or}, og={og}, ob={ob}");
+    println!("input: wr={wr}, wg={wg}, wb={wb}, or={or}, og={og}, ob={ob}, wp={wp}, op={op}");
 
     let dyn_img = ImageReader::open(&img_path)?.decode()?;
     let og_img: RgbImage = dyn_img.to_rgb8();
