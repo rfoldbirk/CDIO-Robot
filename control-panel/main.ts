@@ -20,12 +20,21 @@ app.get("/go", (req, res) => {
     }, 300)
 
     a.stdout.on("data", (data) => {
+
+        console.log(String(data));
         if (data.includes("executed in: ")) {
             const time = String(data).split('executed in: ')[1].trim();
 
             clearTimeout(failsafe)
-            res.send({ ok: true, time })
+
+            try {
+                res.send({ ok: true, time })
+            } catch (e) {
+                console.log("fuck dig")
+            }
         }
+
+
     });
 
     a.stderr.on("data", (data) => {

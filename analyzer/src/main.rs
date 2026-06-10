@@ -1,52 +1,58 @@
 use image::{Rgb, RgbImage, io::Reader as ImageReader};
+use std::collections::HashMap;
 use std::env;
 use std::error::Error;
+use std::time::Duration;
+use rand::{Rng, RngExt};
 
-const INC: i32 = 10;
-
-#[derive(Debug)]
-struct Mark {
-    x: i32,
-    y: i32,
-    avg: Rgb<u8>,
-    color: Color,
-    tbd: bool, // to be deleted;
-}
-
-#[derive(Debug, PartialEq)]
-enum Color {
-    White,
-    Orange,
-}
-
-#[derive(Debug)]
+// State
 struct State {
     original_img: RgbImage,
     img: RgbImage,
-    global_avg: Rgb<u8>,
+    color_target: Target,
+    marks: HashMap<Position, Mark>,
+    groupings: Vec<Grouping>,
 }
 
-use Direction::*;
-#[derive(Debug)]
-enum Direction {
-    Up,
-    Right,
-    Diagonal,
-    OtherDiagonal,
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+struct Grouping(HashMap<Position, bool>);
+
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+struct Position {
+    x: i32,
+    y: i32,
 }
 
-impl Direction {
-    fn vec(&self) -> (i32, i32) {
-        match self {
-            Up => (0, -1),
-            // Down => (0, 1),
-            Right => (1, 0),
-            Diagonal => (-1, -1),
-            OtherDiagonal => (1, -1),
-            // Left => (-1, 0),
-            _ => panic!("lad vær")
-        }
-    }
+struct Rectangle {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+
+
+struct Target {
+    white: Rgb<u8>,
+    white_precision: u8,
+    orange: Rgb<u8>,
+    orange_precision: u8,
+}
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+enum Color {
+    White,
+    Orange,
+    Debug,
+}
+
+#[derive(Hash, Debug, Clone, PartialEq, Eq)]
+struct Mark {
+    /// distance from target color
+    precision: i32,
+    color: Color,
+    x: i32,
+    y: i32,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -55,209 +61,333 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .unwrap_or_else(|| "images/14.jpg".to_string());
 
-    let wr: u8 = env::args().nth(2).unwrap_or("200".to_string()).parse().unwrap_or(200);
-    let wg: u8 = env::args().nth(3).unwrap_or("200".to_string()).parse().unwrap_or(200);
-    let wb: u8 = env::args().nth(4).unwrap_or("200".to_string()).parse().unwrap_or(200);
-    let or: u8 = env::args().nth(5).unwrap_or("190".to_string()).parse().unwrap_or(190);
-    let og: u8 = env::args().nth(6).unwrap_or("100".to_string()).parse().unwrap_or(100);
-    let ob: u8 = env::args().nth(7).unwrap_or("140".to_string()).parse().unwrap_or(140);
+    let wr: u8 = env::args()
+        .nth(2)
+        .unwrap_or("255".to_string())
+        .parse()
+        .unwrap_or(255);
+    let wg: u8 = env::args()
+        .nth(3)
+        .unwrap_or("250".to_string())
+        .parse()
+        .unwrap_or(250);
+    let wb: u8 = env::args()
+        .nth(4)
+        .unwrap_or("242".to_string())
+        .parse()
+        .unwrap_or(242);
+    let or: u8 = env::args()
+        .nth(5)
+        .unwrap_or("239".to_string())
+        .parse()
+        .unwrap_or(239);
+    let og: u8 = env::args()
+        .nth(6)
+        .unwrap_or("182".to_string())
+        .parse()
+        .unwrap_or(182);
+    let ob: u8 = env::args()
+        .nth(7)
+        .unwrap_or("104".to_string())
+        .parse()
+        .unwrap_or(104);
+
     // precision values (unøjagtigheder)
-    let wp: u8 = env::args().nth(8).unwrap_or("10".to_string()).parse().unwrap_or(10);
-    let op: u8 = env::args().nth(9).unwrap_or("10".to_string()).parse().unwrap_or(10);
+    let wp: u8 = env::args()
+        .nth(8)
+        .unwrap_or("74".to_string())
+        .parse()
+        .unwrap_or(74);
+    let op: u8 = env::args()
+        .nth(9)
+        .unwrap_or("41".to_string())
+        .parse()
+        .unwrap_or(41);
 
     println!("input: wr={wr}, wg={wg}, wb={wb}, or={or}, og={og}, ob={ob}, wp={wp}, op={op}");
 
     let dyn_img = ImageReader::open(&img_path)?.decode()?;
-    let og_img: RgbImage = dyn_img.to_rgb8();
-    let (width, height) = og_img.dimensions();
-
+    let original_img: RgbImage = dyn_img.to_rgb8();
+    let img = original_img.clone();
+    // let (width, height) = original_img.dimensions();
 
     let mut state = State {
-        original_img: og_img.clone(),
-        img: og_img.clone(),
-        global_avg: get_avg_color_in_pixel_field_wh(&og_img, 0, 0, width as i32, height as i32),
+        original_img,
+        img,
+        color_target: Target {
+            white: Rgb([wr, wg, wb]),
+            white_precision: wp,
+            orange: Rgb([or, og, ob]),
+            orange_precision: op,
+        },
+        marks: HashMap::new(),
+        groupings: Vec::new(),
     };
 
-    let mut marks: Vec<Mark> = Vec::new();
+    state
+        .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
+        .save().wait()
+        .group_marks() // grupperer pixels som ligger op ad hinanden
+        .save();
 
-    // mark everything that might be a ball!
-    for x in 0..width as i32 / INC {
-        for y in 0..height as i32 / INC {
-            let x = x * INC;
-            let y = y * INC;
-
-            let avg = get_avg_color_in_pixel_field(&state, x, y, INC);
-            let Rgb([r, g, b]) = avg;
-
-            let delta = color_diff(&state, avg);
-            if delta < 8000 { continue }
-            // tjek for hvide bolde
-            // if r > 200 && g > 200 && b > 200 {
-            if r > wr && g > wg && b > wb {
-                marks.push(Mark {
-                    x,
-                    y,
-                    color: Color::White,
-                    avg,
-                    tbd: false,
-                });
-            }
-            // else if r > 190 && g > 100 && b < 140 {
-            else if r > or && g > og && b < ob {
-                marks.push(Mark { x, y, avg, color: Color::Orange, tbd: false });
-            }
-        }
-    }
-
-    for mark in &mut marks {
-        let dist = edge(&mut state, mark, Up, true);
-        let dist_l = edge(&mut state, mark, Right, true);
-
-        // realign
-        mark.x += (dist_l.0 - dist_l.1) * INC/4;
-        mark.y += (dist.1 - dist.0) * INC/4;
-
-        let diag = edge(&mut state, mark, Diagonal, false);
-        let anti_diag = edge(&mut state, mark, OtherDiagonal, false);
-
-        if diag.0 <= 1 || diag.1 <= 1 { mark.tbd = true }
-        if anti_diag.0 <= 1 || anti_diag.1 <= 1 { mark.tbd = true }
-        let dl = diag.0 + diag.1;
-        let adl = anti_diag.0 + anti_diag.1;
-
-        if dl >= adl*2 || adl >= dl*2 { mark.tbd = true }
-    }
-
-    for mark in &marks {
-        if mark.tbd { continue }
-        draw_rectangle(
-            &mut state,
-            mark.x,
-            mark.y,
-            match mark.color {
-                Color::White => Rgb([200, 255, 200]),
-                Color::Orange => Rgb([255, 165, 0]),
-            },
-        );
-    }
-
-
-
-    state.img.save("out.png")?;
     println!("executed in: {}ms", now.elapsed().as_millis());
     Ok(())
 }
 
 
-fn edge(state: &mut State, mark: &Mark, dir: Direction, draw: bool) -> (i32, i32) {
-    let pos = (mark.x as i32, mark.y as i32);
 
-    let inc = (INC as i32) / 2;
-    let d = dir;
-    let dir = d.vec();
-    let dir = (dir.0 * inc, dir.1 * inc);
+impl Grouping {
+    fn calculate_center(&self) -> Rectangle {
+        todo!();
+        // calculate center from points
+        // let x_min = self.0.iter().map(|m| m.x).min().unwrap_or(0);
+        // let x_max = self.0.iter().map(|m| m.x).max().unwrap_or(0);
+        // let y_min = self.0.iter().map(|m| m.y).min().unwrap_or(0);
+        // let y_max = self.0.iter().map(|m| m.y).max().unwrap_or(0);
 
-    let mut r = (0, 0);
-    let mut s = (true, true);
+        // Rectangle {
+        //     x: x_min,
+        //     y: y_min,
+        //     width: x_max - x_min,
+        //     height: y_max - y_min,
+        // }
+    }
 
-    for i in 0..4 {
-        let new_pos = (INC/4+ pos.0 + i * dir.0, INC/4+pos.1 + i * dir.1);
-        let neg_pos = (INC/4+ pos.0 + -i * dir.0, INC/4+pos.1 + -i * dir.1);
+    fn distance(&self, other: &Grouping) -> f64 {
+        let center1 = self.calculate_center();
+        let center2 = other.calculate_center();
 
-        let avg = get_avg_color_in_pixel_field(state, new_pos.0, new_pos.1, INC / 2);
-        let da = color_diff(state, avg);
+        ((center1.x - center2.x) as f64).abs() + ((center1.y - center2.y) as f64).abs()
+    }
+}
 
-        let n_avg = get_avg_color_in_pixel_field(state, neg_pos.0, neg_pos.1, INC / 2);
-        let nda = color_diff(state, n_avg);
+impl State {
+    fn save(&mut self) -> &mut Self {
+        match self.img.save("out.png") {
+            Ok(_) => {}
+            Err(e) => panic!("failed to save image: {}", e),
+        }
 
-        if draw { println!("({d:?}): up: {da}, down: {nda}") }
+        self
+    }
 
-        let lim = 8022;
+    fn clear_image(&mut self) -> &mut Self {
+        self.img = self.original_img.clone();
+        self.save()
+    }
 
-        if da > lim && s.0 {
-            r.0 += 1;
-            if draw {
-                draw_rectangle_with_size(state, new_pos.0, new_pos.1, Rgb([200, 150, 105]), INC / 2);
+    fn wait(&mut self) -> &mut Self {
+        std::thread::sleep(Duration::from_millis(1000));
+        self
+    }
+
+    fn capture(&mut self) -> &mut Self {
+        self.save().clear_image().wait()
+    }
+
+    fn group_marks(&mut self) -> &mut Self {
+        let mut taken: HashMap<Position, ()> = HashMap::new();
+
+        for (pos, mark) in &self.marks {
+            if taken.contains_key(pos) { continue }
+
+            let mut group = Grouping::default();
+            group.0.insert(pos.clone(), true);
+
+            let mut count = 0;
+
+            loop {
+                count += 1;
+                if count > 10000 { break }
+                // gå alle igennem, som ikke er blevet udforsket!
+                let mut insert_later: Vec<Position> = Vec::new();
+                let mut did_something = false;
+
+                for (pos, needs_searching) in group.0.iter_mut() {
+                    if !(*needs_searching) { continue }
+                    println!("Searching {pos:?}");
+                    did_something = true;
+                    *needs_searching = false;
+
+                    let mut new_positions = Vec::new();
+
+                    for i in 0..8 {
+                        new_positions.push(Position { x: pos.x, y: pos.y - i });
+                        new_positions.push(Position { x: pos.x, y: pos.y + i });
+                        new_positions.push(Position { x: pos.x - i, y: pos.y });
+                        new_positions.push(Position { x: pos.x + i, y: pos.y });
+                    }
+
+                    // filtrer positioner som allerede er blevet set.
+                    for new_pos in new_positions {
+                        if taken.contains_key(&new_pos) { continue }
+                        if !self.marks.contains_key(&new_pos) { continue }
+                        insert_later.push(new_pos);
+                    }
+
+                }
+
+                for key in insert_later {
+                    group.0.insert(key.clone(), true);
+                    taken.insert(key.clone(), ());
+                }
+
+                if !did_something { break }
+            }
+
+            self.groupings.push(group);
+        }
+
+        println!("amount of groups: {}", self.groupings.len());
+
+
+        // self.clear_image();
+
+        let mut offset: i32 = 50;
+        for g in &self.groupings {
+            let mut rng = rand::rng();
+            let rgb: [u8; 3] = rng.random();
+
+            for (p, searched) in g.0.iter() {
+                self.img.put_pixel(p.x as u32, p.y as u32, Rgb(rgb));
+            }
+
+        }
+
+        self
+    }
+
+    fn scan_for_marks(&mut self) -> &mut Self {
+        let (width, height) = self.original_img.dimensions();
+
+        for x in 0..width {
+            for y in 0..height {
+                let Rgb([r, g, b]) = self.original_img.get_pixel(x, y);
+                let Rgb([wr, wg, wb]) = self.color_target.white;
+                let Rgb([or, og, ob]) = self.color_target.orange;
+
+                let wp = self.color_target.white_precision;
+                let op = self.color_target.orange_precision;
+
+                let (red_match, red_dist) = check_color(*r, wr, wp);
+                let (green_match, green_dist) = check_color(*g, wg, wp);
+                let (blue_match, blue_dist) = check_color(*b, wb, wp);
+                let (orange_red_match, orange_red_dist) = check_color(*r, or, op);
+                let (orange_green_match, orange_green_dist) = check_color(*g, og, op);
+                let (orange_blue_match, orange_blue_dist) = check_color(*b, ob, op);
+
+                // hvis farverne matcher eksakt så tilføjer vi dem
+                if red_match && green_match && blue_match {
+                    self.marks.insert(
+                        Position {
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                        Mark {
+                            precision: 0,
+                            color: Color::White,
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                    );
+                    self.draw_mark(x, y, 1, Color::White);
+                }
+
+                // hvis farverne matcher eksakt så tilføjer vi dem
+                if orange_red_match && orange_green_match && orange_blue_match {
+                    println!("Putting White Mark on ({x}, {y})");
+                    self.marks.insert(
+                        Position {
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                        Mark {
+                            precision: 0,
+                            color: Color::Orange,
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                    );
+                    // self.img.put_pixel(x, y, Rgb([200, 200, 250]));
+                    self.draw_mark(x, y, 1, Color::Orange);
+                }
             }
         }
-        else {
-            s.0 = false;
-        }
-        if nda > lim && s.1 {
-            r.1 += 1;
-            if draw {
-                draw_rectangle_with_size(state, neg_pos.0, neg_pos.1, Rgb([150, 150, 105]), INC / 2);
+
+        return self;
+    }
+
+    fn draw_rectangle(&mut self, rect: &Rectangle, color: Color) {
+        for x in rect.x..rect.x + rect.width {
+            for y in rect.y..rect.y + rect.height {
+                // only draw the border
+                if x == rect.x
+                    || x == rect.x + rect.width - 1
+                    || y == rect.y
+                    || y == rect.y + rect.height - 1
+                {
+                    self.img.put_pixel(
+                        x as u32,
+                        y as u32,
+                        match color {
+                            Color::White => Rgb([200, 200, 250]),
+                            Color::Orange => Rgb([255, 165, 0]),
+                            Color::Debug => Rgb([250, 133, 152]),
+                        },
+                    );
+                }
             }
         }
-        else {
-            s.1 = false;
-        }
     }
 
-    r
+    fn draw_mark(&mut self, x: u32, y: u32, size: u32, color: Color) {
+        let size = if x < size {
+            x
+        } else if y < size && x > y {
+            y
+        } else {
+            size
+        };
+
+        let (w, h) = self.img.dimensions();
+
+        for _x in x - size..x + size {
+            for _y in y - size..y + size {
+                if _x >= w || _y >= h {
+                    continue;
+                }
+
+                self.img.put_pixel(
+                    _x,
+                    _y,
+                    match color {
+                        Color::White => Rgb([200, 200, 250]),
+                        Color::Orange => Rgb([255, 165, 0]),
+                        Color::Debug => Rgb([222, 193, 132]),
+                    },
+                );
+            }
+        }
+    }
 }
 
-fn color_diff(state: &State, color: Rgb<u8>) -> u32 {
-    let delta_r = color.0[0].abs_diff(state.global_avg.0[0]);
-    let delta_g = color.0[1].abs_diff(state.global_avg.0[1]);
-    let delta_b = color.0[2].abs_diff(state.global_avg.0[2]);
-    (delta_r as u32).pow(2) + (delta_g as u32).pow(2) + (delta_b as u32).pow(2)
-}
+/// calc distance from target to value
+fn check_color(value: u8, target: u8, allowed_distance: u8) -> (bool, u32) {
+    let value: i32 = value as i32;
+    let target: i32 = target as i32;
 
-
-fn get_avg_color_in_pixel_field(state: &State, sx: i32, sy: i32, size: i32) -> Rgb<u8> {
-    get_avg_color_in_pixel_field_wh(&state.original_img, sx, sy, size, size)
-}
-fn get_avg_color_in_pixel_field_wh(
-    img: &RgbImage,
-    sx: i32,
-    sy: i32,
-    width: i32,
-    height: i32,
-) -> Rgb<u8> {
-    let amount = width * height;
-    let mut r_sum = 0;
-    let mut g_sum = 0;
-    let mut b_sum = 0;
-
-    let w = if sx+width >= img.dimensions().0 as i32 {
-        img.dimensions().0 as i32 -2
+    let dist = if value >= target {
+        value - target
     } else {
-        sx+width
+        target - value
     };
 
-    let h = if sy+height >= img.dimensions().1 as i32 {
-        img.dimensions().1 as i32 -2
-    } else {
-        sy+height
-    };
-
-    for x in sx..w {
-        for y in sy..h {
-            let Rgb([r, g, b]) = img.get_pixel(x as u32, y as u32);
-            r_sum += *r as u32;
-            g_sum += *g as u32;
-            b_sum += *b as u32;
-        }
-    }
-
-    let amount = amount as u32;
-
-    Rgb([
-        (r_sum / amount) as u8,
-        (g_sum / amount) as u8,
-        (b_sum / amount) as u8,
-    ])
+    (dist <= allowed_distance as i32, dist as u32)
 }
 
-fn draw_rectangle(state: &mut State, sx: i32, sy: i32, color: Rgb<u8>) {
-    draw_rectangle_with_size(state, sx, sy, color, INC);
-}
-
-fn draw_rectangle_with_size(state: &mut State, sx: i32, sy: i32, color: Rgb<u8>, size: i32) {
-    for x in sx..sx + size {
-        for y in sy..sy + size {
-            state.img.put_pixel(x as u32, y as u32, color);
-        }
-    }
-}
+// fn color_diff(state: &State, color: Rgb<u8>) -> u32 {
+//     let delta_r = color.0[0].abs_diff(state.global_avg.0[0]);
+//     let delta_g = color.0[1].abs_diff(state.global_avg.0[1]);
+//     let delta_b = color.0[2].abs_diff(state.global_avg.0[2]);
+//     (delta_r as u32).pow(2) + (delta_g as u32).pow(2) + (delta_b as u32).pow(2)
+// }
