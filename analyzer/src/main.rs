@@ -10,6 +10,7 @@ struct State {
     original_img: RgbImage,
     img: RgbImage,
     color_target: Target,
+    targets: Targets,
     marks: HashMap<Position, Mark>,
     groupings: Vec<Grouping>,
 }
@@ -31,18 +32,59 @@ struct Rectangle {
 }
 
 
+impl Color {
+    fn rgb(&self) -> Rgb<u8> {
+        match self {
+            Color::White => Rgb([200, 200, 250]),
+            Color::Orange => Rgb([255, 165, 0]),
+            Color::Red => Rgb([255, 125, 20]),
+            Color::Debug => Rgb([222, 193, 132]),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BetterTarget {
+    color: Color,
+    target_hex: Hex,
+    precision: u8,
+}
+
+#[derive(Debug, Clone)]
+struct Hex {
+    hex: String,
+    rgb: Rgb<u8>,
+}
+
+impl Hex {
+    fn new(hex: String) -> Hex {
+        let rgb = hex_to_rgb(&hex);
+
+        Self {
+            hex,
+            rgb,
+        }
+    }
+}
+
+
+#[derive(Debug, Clone)]
+struct Targets(Vec<BetterTarget>);
 
 struct Target {
     white: Rgb<u8>,
     white_precision: u8,
     orange: Rgb<u8>,
     orange_precision: u8,
+    red: Rgb<u8>,
+    red_precision: u8,
 }
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone)]
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy)]
 enum Color {
     White,
     Orange,
+    Red,
     Debug,
 }
 
@@ -55,78 +97,98 @@ struct Mark {
     y: i32,
 }
 
+
+fn map_hex_val(character: Option<char>) -> u8 {
+    match character.unwrap() {
+        '0' => 0,
+        '1' => 1,
+        '2' => 2,
+        '3' => 3,
+        '4' => 4,
+        '5' => 5,
+        '6' => 6,
+        '7' => 7,
+        '8' => 8,
+        '9' => 9,
+        'A' => 10,
+        'B' => 11,
+        'C' => 12,
+        'D' => 13,
+        'E' => 14,
+        'F' => 15,
+        _ => panic!("Invalid Hex Value!"),
+    }
+}
+
+fn hex_to_rgb(hex: &str) -> Rgb<u8> {
+    let hex = hex.split("#").last().unwrap().to_uppercase();
+    let mut chars = hex.chars();
+
+    let r = map_hex_val(chars.nth(0)) * 16 + map_hex_val(chars.nth(0));
+    let g = map_hex_val(chars.nth(0)) * 16 + map_hex_val(chars.nth(0));
+    let b = map_hex_val(chars.nth(0)) * 16 + map_hex_val(chars.nth(0));
+
+    Rgb([r, g, b])
+}
+
+
 fn main() -> Result<(), Box<dyn Error>> {
     let now = std::time::Instant::now();
     let img_path = env::args()
         .nth(1)
         .unwrap_or_else(|| "images/14.jpg".to_string());
 
-    let wr: u8 = env::args()
-        .nth(2)
-        .unwrap_or("255".to_string())
-        .parse()
-        .unwrap_or(255);
-    let wg: u8 = env::args()
-        .nth(3)
-        .unwrap_or("250".to_string())
-        .parse()
-        .unwrap_or(250);
-    let wb: u8 = env::args()
-        .nth(4)
-        .unwrap_or("242".to_string())
-        .parse()
-        .unwrap_or(242);
-    let or: u8 = env::args()
-        .nth(5)
-        .unwrap_or("239".to_string())
-        .parse()
-        .unwrap_or(239);
-    let og: u8 = env::args()
-        .nth(6)
-        .unwrap_or("182".to_string())
-        .parse()
-        .unwrap_or(182);
-    let ob: u8 = env::args()
-        .nth(7)
-        .unwrap_or("104".to_string())
-        .parse()
-        .unwrap_or(104);
+    // load farve værdier fra kommandolinjen
+    let white_hex: String = env::args().nth(2).unwrap_or("#FFFFFF".to_string());
+    let orange_hex: String = env::args().nth(3).unwrap_or("#DB2535".to_string());
+    let red_hex: String = env::args().nth(4).unwrap_or("#D82938".to_string());
 
     // precision values (unøjagtigheder)
-    let wp: u8 = env::args()
-        .nth(8)
-        .unwrap_or("74".to_string())
-        .parse()
-        .unwrap_or(74);
-    let op: u8 = env::args()
-        .nth(9)
-        .unwrap_or("41".to_string())
-        .parse()
-        .unwrap_or(41);
+    let wp: u8 = env::args().nth(5).unwrap_or("74".to_string()).parse().unwrap();
+    let op: u8 = env::args().nth(6).unwrap_or("41".to_string()).parse().unwrap();
+    let rp: u8 = env::args().nth(7).unwrap_or("41".to_string()).parse().unwrap();
 
-    println!("input: wr={wr}, wg={wg}, wb={wb}, or={or}, og={og}, ob={ob}, wp={wp}, op={op}");
+    // print så vi kan se hvad fanden der foregår :)
+    println!("INPUT: {white_hex}, {orange_hex}, {red_hex}, PRECISION: {wp}, {op}, {rp}");
+
+    let white = hex_to_rgb(&white_hex);
+    let orange = hex_to_rgb(&orange_hex);
+    let red = hex_to_rgb(&red_hex);
+
+
+
 
     let dyn_img = ImageReader::open(&img_path)?.decode()?;
     let original_img: RgbImage = dyn_img.to_rgb8();
     let img = original_img.clone();
-    // let (width, height) = original_img.dimensions();
 
+
+    
     let mut state = State {
         original_img,
         img,
         color_target: Target {
-            white: Rgb([wr, wg, wb]),
+            white,
             white_precision: wp,
-            orange: Rgb([or, og, ob]),
+            orange,
             orange_precision: op,
+            red,
+            red_precision: rp, 
         },
+        targets: Targets(vec![
+            BetterTarget { color: Color::White, target_hex: Hex::new(white_hex), precision: wp },
+            BetterTarget { color: Color::Orange, target_hex: Hex::new(orange_hex), precision: op },
+            BetterTarget { color: Color::Red, target_hex: Hex::new(red_hex), precision: rp },
+        ]),
         marks: HashMap::new(),
         groupings: Vec::new(),
     };
 
+
+    
     state
         .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
-        .save().wait()
+        // .save().wait()
         .group_marks() // grupperer pixels som ligger op ad hinanden
         .save();
 
@@ -260,57 +322,77 @@ impl State {
     fn scan_for_marks(&mut self) -> &mut Self {
         let (width, height) = self.original_img.dimensions();
 
+        let targets = self.targets.clone();
+
         for x in 0..width {
             for y in 0..height {
-                let Rgb([r, g, b]) = self.original_img.get_pixel(x, y);
-                let Rgb([wr, wg, wb]) = self.color_target.white;
-                let Rgb([or, og, ob]) = self.color_target.orange;
+                for BetterTarget { color, target_hex, precision } in &targets.0 {
+                    let Rgb([r, g, b]) = self.original_img.get_pixel(x, y);
+                    let Rgb([target_r, target_g, target_b]) = target_hex.rgb;
 
-                let wp = self.color_target.white_precision;
-                let op = self.color_target.orange_precision;
+                    let (red_match, red_dist) = check_color(*r, target_r, *precision);
+                    let (green_match, green_dist) = check_color(*g, target_g, *precision);
+                    let (blue_match, blue_dist) = check_color(*b, target_b, *precision);
 
-                let (red_match, red_dist) = check_color(*r, wr, wp);
-                let (green_match, green_dist) = check_color(*g, wg, wp);
-                let (blue_match, blue_dist) = check_color(*b, wb, wp);
-                let (orange_red_match, orange_red_dist) = check_color(*r, or, op);
-                let (orange_green_match, orange_green_dist) = check_color(*g, og, op);
-                let (orange_blue_match, orange_blue_dist) = check_color(*b, ob, op);
-
-                // hvis farverne matcher eksakt så tilføjer vi dem
-                if red_match && green_match && blue_match {
-                    self.marks.insert(
-                        Position {
-                            x: x as i32,
-                            y: y as i32,
-                        },
-                        Mark {
-                            precision: 0,
-                            color: Color::White,
-                            x: x as i32,
-                            y: y as i32,
-                        },
-                    );
-                    self.draw_mark(x, y, 1, Color::White);
+                    if red_match && green_match && blue_match {
+                        self.marks.insert(
+                            Position { x: x as i32, y: y as i32 },
+                            Mark { precision: 0, color: color.clone(), x: x as i32, y: y as i32 },
+                        );
+                        self.draw_mark(x, y, 1, *color);
+                    }
                 }
 
-                // hvis farverne matcher eksakt så tilføjer vi dem
-                if orange_red_match && orange_green_match && orange_blue_match {
-                    println!("Putting White Mark on ({x}, {y})");
-                    self.marks.insert(
-                        Position {
-                            x: x as i32,
-                            y: y as i32,
-                        },
-                        Mark {
-                            precision: 0,
-                            color: Color::Orange,
-                            x: x as i32,
-                            y: y as i32,
-                        },
-                    );
-                    // self.img.put_pixel(x, y, Rgb([200, 200, 250]));
-                    self.draw_mark(x, y, 1, Color::Orange);
-                }
+                
+                // let Rgb([r, g, b]) = self.original_img.get_pixel(x, y);
+                // let Rgb([wr, wg, wb]) = self.color_target.white;
+                // let Rgb([or, og, ob]) = self.color_target.orange;
+
+                // let wp = self.color_target.white_precision;
+                // let op = self.color_target.orange_precision;
+
+                // let (red_match, red_dist) = check_color(*r, wr, wp);
+                // let (green_match, green_dist) = check_color(*g, wg, wp);
+                // let (blue_match, blue_dist) = check_color(*b, wb, wp);
+                // let (orange_red_match, orange_red_dist) = check_color(*r, or, op);
+                // let (orange_green_match, orange_green_dist) = check_color(*g, og, op);
+                // let (orange_blue_match, orange_blue_dist) = check_color(*b, ob, op);
+
+                // // hvis farverne matcher eksakt så tilføjer vi dem
+                // if red_match && green_match && blue_match {
+                //     self.marks.insert(
+                //         Position {
+                //             x: x as i32,
+                //             y: y as i32,
+                //         },
+                //         Mark {
+                //             precision: 0,
+                //             color: Color::White,
+                //             x: x as i32,
+                //             y: y as i32,
+                //         },
+                //     );
+                //     self.draw_mark(x, y, 1, Color::White);
+                // }
+
+                // // hvis farverne matcher eksakt så tilføjer vi dem
+                // if orange_red_match && orange_green_match && orange_blue_match {
+                //     println!("Putting White Mark on ({x}, {y})");
+                //     self.marks.insert(
+                //         Position {
+                //             x: x as i32,
+                //             y: y as i32,
+                //         },
+                //         Mark {
+                //             precision: 0,
+                //             color: Color::Orange,
+                //             x: x as i32,
+                //             y: y as i32,
+                //         },
+                //     );
+                //     // self.img.put_pixel(x, y, Rgb([200, 200, 250]));
+                //     self.draw_mark(x, y, 1, Color::Orange);
+                // }
             }
         }
 
@@ -329,11 +411,7 @@ impl State {
                     self.img.put_pixel(
                         x as u32,
                         y as u32,
-                        match color {
-                            Color::White => Rgb([200, 200, 250]),
-                            Color::Orange => Rgb([255, 165, 0]),
-                            Color::Debug => Rgb([250, 133, 152]),
-                        },
+                        color.rgb()
                     );
                 }
             }
@@ -360,11 +438,7 @@ impl State {
                 self.img.put_pixel(
                     _x,
                     _y,
-                    match color {
-                        Color::White => Rgb([200, 200, 250]),
-                        Color::Orange => Rgb([255, 165, 0]),
-                        Color::Debug => Rgb([222, 193, 132]),
-                    },
+                    color.rgb()
                 );
             }
         }
