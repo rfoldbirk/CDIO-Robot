@@ -41,7 +41,7 @@
       </div>
     </div>
 
-    <input id="image" value="14.png" type="text" />
+    <input id="filename" value="14.png" type="text" />
     <button onclick="reset()">Reset</button>
     <button onclick="save_calibration_values()">Save</button>
     <button onclick="load_calibration_values()">Load</button>
@@ -54,7 +54,7 @@
 
     <script>
       function save_calibration_values(prefix = "tmp") {
-        let ids_to_save = ["white", "white-precision", "orange", "orange-precision", "red", "red-precision"];
+        let ids_to_save = ["filename", "white", "white-precision", "orange", "orange-precision", "red", "red-precision"];
         let values = {};
         for (const id of ids_to_save) {
           let elem = document.getElementById(id);
@@ -124,10 +124,13 @@
         }
         values = JSON.parse(values);
 
-        let white = hex_to_rgb(values.white);
-        let orange = hex_to_rgb(values.orange);
+        let { filename, white, orange, red } = values;
+        white = white.split('#')[1];
+        orange = orange.split('#')[1];
+        red = red.split('#')[1];
 
-        let res = await fetch(`/go?wr=${white.r}&wg=${white.g}&wb=${white.b}&or=${orange.r}&og=${orange.g}&ob=${orange.b}&wp=${values["white-precision"]}&op=${values["orange-precision"]}`);
+
+        let res = await fetch(`/go?filename=${filename}&white=${white}&orange=${orange}&red=${red}&wp=${values["white-precision"]}&op=${values["orange-precision"]}&rp=${values["red-precision"]}`);
 
         let img = await fetch("/latest.png");
 
@@ -149,7 +152,7 @@
         localStorage.clear();
         localStorage.setItem(
           "ic_saved_values",
-          JSON.stringify({ white: "#c8c8c8", "white-precision": "10", orange: "#be648c", "orange-precision": "10" }),
+          JSON.stringify({ filename: "14.jpg", white: "#c8c8c8", "white-precision": "10", orange: "#be648c", "orange-precision": "10" }),
         );
         load_calibration_values("ic");
       }

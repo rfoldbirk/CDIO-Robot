@@ -1,3 +1,7 @@
+body {
+  background: #333;
+}
+
 .input-grp {
   display: flex;
   flex-direction: column;

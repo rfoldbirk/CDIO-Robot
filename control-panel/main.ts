@@ -12,15 +12,26 @@ app.get("/style.css", (req, res) => {
 });
 
 app.get("/go", (req, res) => {
-    const { wr, wg, wb, or, og, ob, wp, op } = req.query;
-    let a = spawn("../analyzer/target/release/track-analyzer", ["../analyzer/images/14.jpg", `${wr}`, `${wg}`, `${wb}`, `${or}`, `${og}`, `${ob}`, `${wp}`, `${op}`]);
+    const { filename, white, orange, red, wp, op, rp } = req.query;
+
+    console.log(req.query);
+    console.log(filename, white, orange, red, wp, op, rp );
+    
+    let a = spawn("../analyzer/target/release/track-analyzer", [
+        "../analyzer/images/" + filename,
+        `${white}`,
+        `${orange}`,
+        `${red}`,
+        `${wp}`,
+        `${op}`,
+        `${rp}`
+    ]);
 
     let failsafe = setTimeout(() => {
         res.send({ok: false})
     }, 300)
 
     a.stdout.on("data", (data) => {
-
         console.log(String(data));
         if (data.includes("executed in: ")) {
             const time = String(data).split('executed in: ')[1].trim();

@@ -1,9 +1,11 @@
 use image::{Rgb, RgbImage, io::Reader as ImageReader};
-use std::collections::HashMap;
+use std::{cmp::Reverse, collections::HashMap};
 use std::env;
 use std::error::Error;
 use std::time::Duration;
 use rand::{Rng, RngExt};
+
+const MAX: i32 = 100000;
 
 // State
 struct State {
@@ -22,6 +24,12 @@ struct Grouping(HashMap<Position, bool>);
 struct Position {
     x: i32,
     y: i32,
+}
+
+impl Position {
+    fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
 }
 
 struct Rectangle {
@@ -190,6 +198,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
         // .save().wait()
         .group_marks() // grupperer pixels som ligger op ad hinanden
+        .filter_groups()
+        // .find_map_border()
+        .find_borders()
         .save();
 
     println!("executed in: {}ms", now.elapsed().as_millis());
@@ -215,6 +226,10 @@ impl Grouping {
         // }
     }
 
+    fn volume(&self) -> usize {
+        self.0.len()
+    }
+
     fn distance(&self, other: &Grouping) -> f64 {
         let center1 = self.calculate_center();
         let center2 = other.calculate_center();
@@ -235,7 +250,7 @@ impl State {
 
     fn clear_image(&mut self) -> &mut Self {
         self.img = self.original_img.clone();
-        self.save()
+        self
     }
 
     fn wait(&mut self) -> &mut Self {
@@ -267,12 +282,13 @@ impl State {
 
                 for (pos, needs_searching) in group.0.iter_mut() {
                     if !(*needs_searching) { continue }
-                    println!("Searching {pos:?}");
+                    // println!("Searching {pos:?}");
                     did_something = true;
                     *needs_searching = false;
 
                     let mut new_positions = Vec::new();
 
+                    // Search in every position!
                     for i in 0..8 {
                         new_positions.push(Position { x: pos.x, y: pos.y - i });
                         new_positions.push(Position { x: pos.x, y: pos.y + i });
@@ -305,19 +321,151 @@ impl State {
 
         // self.clear_image();
 
-        let mut offset: i32 = 50;
-        for g in &self.groupings {
-            let mut rng = rand::rng();
-            let rgb: [u8; 3] = rng.random();
+        // let mut offset: i32 = 50;
+        // for g in &self.groupings {
+        //     let mut rng = rand::rng();
+        //     let rgb: [u8; 3] = rng.random();
 
-            for (p, searched) in g.0.iter() {
-                self.img.put_pixel(p.x as u32, p.y as u32, Rgb(rgb));
+        //     for (p, searched) in g.0.iter() {
+        //         self.img.put_pixel(p.x as u32, p.y as u32, Rgb(rgb));
+        //     }
+        // }
+
+        self
+    }
+
+
+    /// Går igennem alle grupper og fjerner dem med for små volumener
+    fn filter_groups(&mut self) -> &mut Self {
+        // let mut groups_to_render = Vec::new();
+
+        for group in &self.groupings.clone() {
+            if group.volume() > 200 {
+                self.draw_group(group);
+                println!("Group has volume: {}", group.volume());
             }
+        }
 
+
+        // let group = self.groupings.iter().nth(4);
+        // let group = group.unwrap().clone();
+        // self.draw_group(&group);
+        
+
+        self
+    }
+
+    fn find_borders(&mut self) -> &mut Self {
+        self.groupings.sort_by_key(|g| Reverse(g.volume()));
+
+        for g in &self.groupings {
+            println!("Volume: {}", g.volume());
+        }
+
+        println!("Largest: {}", self.groupings.first().unwrap().volume());
+        println!("Cross: {}", self.groupings.iter().nth(1).unwrap().volume());
+
+
+        self.find_map_border();
+        self.find_cross();
+
+        self
+    }
+
+
+    fn find_cross(&mut self) -> &mut Self {
+        let group_to_inspect = self.groupings.iter().nth(1).unwrap();
+
+        let mut right = Position::new(0, 0);
+        let mut left = Position::new(MAX, MAX);
+        let mut top = Position::new(0, MAX);
+        let mut bottom = Position::new(0, 0);
+        
+        for (pos, _) in &group_to_inspect.0 {
+            if pos.y < top.y { top = pos.clone() }
+            if pos.y > bottom.y { bottom = pos.clone() }
+
+            if pos.x > right.x { right = pos.clone() }
+            if pos.x < left.x { left = pos.clone() }
+        }
+
+
+        top.x = left.x + (right.x - left.x)/2;
+        bottom.x = left.x + (right.x - left.x)/2;
+
+        right.y = top.y + (bottom.y - top.y)/2;
+        left.y = top.y + (bottom.y - top.y)/2;
+
+        self.draw_mark(right.x as u32, right.y as u32, 10, Color::White);
+        self.draw_mark(left.x as u32, left.y as u32, 10, Color::White);
+        self.draw_mark(top.x as u32, top.y as u32, 10, Color::White);
+        self.draw_mark(bottom.x as u32, bottom.y as u32, 10, Color::White);
+
+        self
+    }
+
+
+    fn find_map_border(&mut self) -> &mut Self {
+        // find den største
+
+        let (width, height) = self.img.dimensions();
+        let (width, height) = (width as i32, height as i32);
+
+        let group_to_inspect = self.groupings.first().unwrap();
+        
+        // Det bagerste navn fortæller prioriteten.
+        // Dvs. top_right er i top området og vi forsøger at finde den mest til højre
+        let mut top_right = Position::new(0, height);
+        let mut top_left = Position::new(width, height);
+
+        let mut right_top = Position::new(0, height);
+        let mut right_bottom = Position::new(0, 0);
+
+        let mut left_top = Position::new(width, height);
+        let mut left_bottom = Position::new(width, 0);
+
+        let mut bottom_right = Position::new(0, 0);
+        let mut bottom_left = Position::new(width, 0);
+
+        // find the pixel most in the right corner and above half the image.
+        for (pos, _) in &group_to_inspect.0 {
+            if pos.x > top_right.x && pos.y < height/4 { top_right = pos.clone(); }
+            if pos.x < top_left.x && pos.y < height/4 { top_left = pos.clone(); }
+            if pos.y < right_top.y && pos.x > width/4*3 { right_top = pos.clone(); }
+            if pos.y > right_bottom.y && pos.x > width/4*3 { right_bottom= pos.clone(); }
+            if pos.y > left_bottom.y && pos.x < width/4 { left_bottom = pos.clone(); }
+            if pos.y < left_top.y && pos.x < width/4*3 { left_top = pos.clone(); }
+
+            if pos.x > bottom_right.x && pos.y > height/4*3 { bottom_right = pos.clone() }
+            if pos.x < bottom_left.x && pos.y > height/4*3 { bottom_left = pos.clone() }
+        }
+
+
+        self.draw_mark(top_right.x as u32, top_right.y as u32, 10, Color::White);
+        self.draw_mark(top_left.x as u32, top_left.y as u32, 10, Color::White);
+
+        self.draw_mark(right_top.x as u32, right_top.y as u32, 10, Color::White);
+        self.draw_mark(right_bottom.x as u32, right_bottom.y as u32, 10, Color::White);
+
+        self.draw_mark(left_bottom.x as u32, left_bottom.y as u32, 10, Color::White);
+        self.draw_mark(left_top.x as u32, left_top.y as u32, 10, Color::White);
+
+        self.draw_mark(bottom_right.x as u32, bottom_right.y as u32, 10, Color::White);
+        self.draw_mark(bottom_left.x as u32, bottom_left.y as u32, 10, Color::White);
+
+        self
+    }
+
+
+    fn draw_group(&mut self, group: &Grouping) -> &mut Self {
+        for (pos, _) in &group.0 {
+            let m = self.marks.get(pos).unwrap();
+            self.draw_mark(pos.x as u32, pos.y as u32, 1, m.color);
         }
 
         self
     }
+    
 
     fn scan_for_marks(&mut self) -> &mut Self {
         let (width, height) = self.original_img.dimensions();
@@ -342,57 +490,6 @@ impl State {
                         self.draw_mark(x, y, 1, *color);
                     }
                 }
-
-                
-                // let Rgb([r, g, b]) = self.original_img.get_pixel(x, y);
-                // let Rgb([wr, wg, wb]) = self.color_target.white;
-                // let Rgb([or, og, ob]) = self.color_target.orange;
-
-                // let wp = self.color_target.white_precision;
-                // let op = self.color_target.orange_precision;
-
-                // let (red_match, red_dist) = check_color(*r, wr, wp);
-                // let (green_match, green_dist) = check_color(*g, wg, wp);
-                // let (blue_match, blue_dist) = check_color(*b, wb, wp);
-                // let (orange_red_match, orange_red_dist) = check_color(*r, or, op);
-                // let (orange_green_match, orange_green_dist) = check_color(*g, og, op);
-                // let (orange_blue_match, orange_blue_dist) = check_color(*b, ob, op);
-
-                // // hvis farverne matcher eksakt så tilføjer vi dem
-                // if red_match && green_match && blue_match {
-                //     self.marks.insert(
-                //         Position {
-                //             x: x as i32,
-                //             y: y as i32,
-                //         },
-                //         Mark {
-                //             precision: 0,
-                //             color: Color::White,
-                //             x: x as i32,
-                //             y: y as i32,
-                //         },
-                //     );
-                //     self.draw_mark(x, y, 1, Color::White);
-                // }
-
-                // // hvis farverne matcher eksakt så tilføjer vi dem
-                // if orange_red_match && orange_green_match && orange_blue_match {
-                //     println!("Putting White Mark on ({x}, {y})");
-                //     self.marks.insert(
-                //         Position {
-                //             x: x as i32,
-                //             y: y as i32,
-                //         },
-                //         Mark {
-                //             precision: 0,
-                //             color: Color::Orange,
-                //             x: x as i32,
-                //             y: y as i32,
-                //         },
-                //     );
-                //     // self.img.put_pixel(x, y, Rgb([200, 200, 250]));
-                //     self.draw_mark(x, y, 1, Color::Orange);
-                // }
             }
         }
 
