@@ -130,7 +130,9 @@
         red = red.split('#')[1];
 
 
-        let res = await fetch(`/go?filename=${filename}&white=${white}&orange=${orange}&red=${red}&wp=${values["white-precision"]}&op=${values["orange-precision"]}&rp=${values["red-precision"]}`);
+        let res = await fetch(`/obstacles?filename=${filename}&white=${white}&orange=${orange}&red=${red}&wp=${values["white-precision"]}&op=${values["orange-precision"]}&rp=${values["red-precision"]}`);
+
+        let balls_res = await fetch(`/balls?filename=${filename}`);
 
         let img = await fetch("/latest.png");
 

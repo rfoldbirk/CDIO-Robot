@@ -44,3 +44,19 @@ Basically vil jeg gerne have at inputtet til analyzeren skal være
 WHITE: hex, PRECISION: int, 
 ORANGE: hex, PRECISION: int, 
 RED: hex, PRECISION: int
+
+
+## Ide til forbedring af scanning af boldene
+Lige nu er det ikke hele bolden vi får med... Men det er måske fint!
+
+Efter første scanning tjekker vi volumen af de scanninger og filtrer alle de små fra. Når vi har fundet de store, kan vi fortsætte søgningen!
+
+Nu er det tid til at fortsætte søgningen af marks, men med en større accept for unøjagtighed. Vi ved allerede hvor vores bolde er, så vores søgning er kun der!
+
+- [ ] Find de fire hjørner
+- [ ] Find krydset
+
+
+## Optimering!
+- Efter første gennemgang og filtrering kan vi se inden for hvilke pixels vi faktisk behøver at scanne!
+  Vi kan formentlig filtrerer en del pixels fra!

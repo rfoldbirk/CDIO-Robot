@@ -1,4 +1,5 @@
 use image::{Rgb, RgbImage, io::Reader as ImageReader};
+use serde::Serialize;
 use std::{cmp::Reverse, collections::HashMap};
 use std::env;
 use std::error::Error;
@@ -6,6 +7,16 @@ use std::time::Duration;
 use rand::{Rng, RngExt};
 
 const MAX: i32 = 100000;
+
+
+#[derive(Serialize)]
+struct Output {
+    walls: Vec<Position>,
+    cross: Vec<Position>,
+    // balls: Vec<Ba>
+}
+
+
 
 // State
 struct State {
@@ -18,9 +29,12 @@ struct State {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
-struct Grouping(HashMap<Position, bool>);
+struct Grouping {
+    marks: HashMap<Position, bool>,
+    color: Color,
+}
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 struct Position {
     x: i32,
     y: i32,
@@ -88,8 +102,9 @@ struct Target {
     red_precision: u8,
 }
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy)]
+#[derive(Default, Hash, PartialEq, Eq, Debug, Clone, Copy)]
 enum Color {
+    #[default]
     White,
     Orange,
     Red,
@@ -139,6 +154,20 @@ fn hex_to_rgb(hex: &str) -> Rgb<u8> {
     Rgb([r, g, b])
 }
 
+// enum Command {
+//     GetMap,
+// }
+
+
+// impl Command {
+//     fn parse(command: &str) -> Self {
+//         match command {
+//             "map" => Self::GetMap,
+//             _ => panic!("Unsupported command: {command}"),
+//         }
+//     }
+// }
+
 
 fn main() -> Result<(), Box<dyn Error>> {
     let now = std::time::Instant::now();
@@ -155,6 +184,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let wp: u8 = env::args().nth(5).unwrap_or("74".to_string()).parse().unwrap();
     let op: u8 = env::args().nth(6).unwrap_or("41".to_string()).parse().unwrap();
     let rp: u8 = env::args().nth(7).unwrap_or("41".to_string()).parse().unwrap();
+
+    // let command: String = env::args().nth(8).unwrap_or("all".into()).parse().unwrap();
+    // let command: Command = Command::parse(&command);
 
     // print så vi kan se hvad fanden der foregår :)
     println!("INPUT: {white_hex}, {orange_hex}, {red_hex}, PRECISION: {wp}, {op}, {rp}");
@@ -193,16 +225,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
 
-    
+   
     state
         .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
-        // .save().wait()
         .group_marks() // grupperer pixels som ligger op ad hinanden
         .filter_groups()
-        // .find_map_border()
-        .find_borders()
-        .save();
+        .find_borders();
 
+
+    state.draw_mark(1500, 400, 10, Color::Debug);
+
+    state.save();
+    
     println!("executed in: {}ms", now.elapsed().as_millis());
     Ok(())
 }
@@ -227,7 +261,7 @@ impl Grouping {
     }
 
     fn volume(&self) -> usize {
-        self.0.len()
+        self.marks.len()
     }
 
     fn distance(&self, other: &Grouping) -> f64 {
@@ -240,6 +274,17 @@ impl Grouping {
 
 impl State {
     fn save(&mut self) -> &mut Self {
+        let walls: Vec<Position> = self.groupings.first().unwrap().marks.clone().into_keys().collect();
+        let cross: Vec<Position> = self.groupings.iter().nth(1).unwrap().marks.clone().into_keys().collect();
+
+        let output = Output {
+            walls,
+            cross,
+        };
+
+        let json = serde_json::to_string_pretty(&output).expect("du en taber");
+        std::fs::write("./obstacles.json", json).expect("Nicklas har også en lille diller");
+
         match self.img.save("out.png") {
             Ok(_) => {}
             Err(e) => panic!("failed to save image: {}", e),
@@ -269,7 +314,8 @@ impl State {
             if taken.contains_key(pos) { continue }
 
             let mut group = Grouping::default();
-            group.0.insert(pos.clone(), true);
+            group.marks.insert(pos.clone(), true);
+            group.color = mark.color;
 
             let mut count = 0;
 
@@ -280,7 +326,7 @@ impl State {
                 let mut insert_later: Vec<Position> = Vec::new();
                 let mut did_something = false;
 
-                for (pos, needs_searching) in group.0.iter_mut() {
+                for (pos, needs_searching) in group.marks.iter_mut() {
                     if !(*needs_searching) { continue }
                     // println!("Searching {pos:?}");
                     did_something = true;
@@ -306,7 +352,7 @@ impl State {
                 }
 
                 for key in insert_later {
-                    group.0.insert(key.clone(), true);
+                    group.marks.insert(key.clone(), true);
                     taken.insert(key.clone(), ());
                 }
 
@@ -339,11 +385,13 @@ impl State {
     fn filter_groups(&mut self) -> &mut Self {
         // let mut groups_to_render = Vec::new();
 
+        self.groupings.retain(|g| g.volume() > 200 );
+        
         for group in &self.groupings.clone() {
-            if group.volume() > 200 {
-                self.draw_group(group);
-                println!("Group has volume: {}", group.volume());
-            }
+            if group.color == Color::Red && group.volume() < 15000 { continue }
+            
+            self.draw_group(group);
+            println!("{:#?} Group has volume: {}", group.color, group.volume());
         }
 
 
@@ -357,10 +405,6 @@ impl State {
 
     fn find_borders(&mut self) -> &mut Self {
         self.groupings.sort_by_key(|g| Reverse(g.volume()));
-
-        for g in &self.groupings {
-            println!("Volume: {}", g.volume());
-        }
 
         println!("Largest: {}", self.groupings.first().unwrap().volume());
         println!("Cross: {}", self.groupings.iter().nth(1).unwrap().volume());
@@ -381,7 +425,7 @@ impl State {
         let mut top = Position::new(0, MAX);
         let mut bottom = Position::new(0, 0);
         
-        for (pos, _) in &group_to_inspect.0 {
+        for (pos, _) in &group_to_inspect.marks {
             if pos.y < top.y { top = pos.clone() }
             if pos.y > bottom.y { bottom = pos.clone() }
 
@@ -428,7 +472,7 @@ impl State {
         let mut bottom_left = Position::new(width, 0);
 
         // find the pixel most in the right corner and above half the image.
-        for (pos, _) in &group_to_inspect.0 {
+        for (pos, _) in &group_to_inspect.marks {
             if pos.x > top_right.x && pos.y < height/4 { top_right = pos.clone(); }
             if pos.x < top_left.x && pos.y < height/4 { top_left = pos.clone(); }
             if pos.y < right_top.y && pos.x > width/4*3 { right_top = pos.clone(); }
@@ -453,12 +497,19 @@ impl State {
         self.draw_mark(bottom_right.x as u32, bottom_right.y as u32, 10, Color::White);
         self.draw_mark(bottom_left.x as u32, bottom_left.y as u32, 10, Color::White);
 
+        let y = left_bottom.y - (left_bottom.y - left_top.y)/2;
+        let x = left_bottom.x + (left_top.x - left_bottom.x)/2;
+
+        println!("MIDDLE: {x}, {y}");
+
+        self.draw_mark(x as u32, y as u32, 10, Color::White);
+
         self
     }
 
 
     fn draw_group(&mut self, group: &Grouping) -> &mut Self {
-        for (pos, _) in &group.0 {
+        for (pos, _) in &group.marks {
             let m = self.marks.get(pos).unwrap();
             self.draw_mark(pos.x as u32, pos.y as u32, 1, m.color);
         }
@@ -487,7 +538,7 @@ impl State {
                             Position { x: x as i32, y: y as i32 },
                             Mark { precision: 0, color: color.clone(), x: x as i32, y: y as i32 },
                         );
-                        self.draw_mark(x, y, 1, *color);
+                        // self.draw_mark(x, y, 1, *color);
                     }
                 }
             }
