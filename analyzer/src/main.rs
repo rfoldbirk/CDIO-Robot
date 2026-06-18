@@ -181,9 +181,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let red_hex: String = env::args().nth(4).unwrap_or("#D82938".to_string());
 
     // precision values (unøjagtigheder)
-    let wp: u8 = env::args().nth(5).unwrap_or("74".to_string()).parse().unwrap();
-    let op: u8 = env::args().nth(6).unwrap_or("41".to_string()).parse().unwrap();
-    let rp: u8 = env::args().nth(7).unwrap_or("41".to_string()).parse().unwrap();
+    let wp: u8 = env::args().nth(5).unwrap_or("74".to_string()).parse().expect("Naah");
+    let op: u8 = env::args().nth(6).unwrap_or("41".to_string()).parse().expect("Naah");
+    let rp: u8 = env::args().nth(7).unwrap_or("41".to_string()).parse().expect("Naah");
 
     // let command: String = env::args().nth(8).unwrap_or("all".into()).parse().unwrap();
     // let command: Command = Command::parse(&command);

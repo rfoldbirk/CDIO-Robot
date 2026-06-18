@@ -14,6 +14,7 @@ app.get("/style.css", (req, res) => {
 
 app.get('/balls', (req, res) => {
     const { filename } = req.query;
+    console.log(" -> Filename:", filename);
     let process = spawn('../track/target/release/track', [
         '../analyzer/images/' + filename,
     ]);
