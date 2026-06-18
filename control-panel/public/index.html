@@ -4,7 +4,7 @@
     <link rel="stylesheet" href="/style.css" />
   </head>
   <body>
-    <div style="display: flex">
+    <div style="display: flex;">
       <div>
         <div class="input-grp">
           <p>Calibrate white:</p>
@@ -12,7 +12,7 @@
             <input type="color" id="white" name="white" value="rgb(200, 200, 200)" />
             <label for="white">White <span id="white-precision-value">0</span> </label>
           </div>
-          <input name="white-precision" id="white-precision" type="range" min="0" max="20" />
+          <input name="white-precision" id="white-precision" type="range" min="0" max="100" />
         </div>
       </div>
       <div>
@@ -23,12 +23,25 @@
             <label for="orange">Orange: <span id="orange-precision-value">0</span> </label>
           </div>
           <div>
-            <input name="orange-precision" id="orange-precision" type="range" min="0" max="20" />
+            <input name="orange-precision" id="orange-precision" type="range" min="0" max="100" />
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="input-grp">
+          <p>Calibrate Red:</p>
+          <div>
+            <input type="color" id="red" name="red" value="rgb(190, 100, 140)" />
+            <label for="red">red: <span id="red-precision-value">0</span> </label>
+          </div>
+          <div>
+            <input name="red-precision" id="red-precision" type="range" min="0" max="100" />
           </div>
         </div>
       </div>
     </div>
 
+    <input id="filename" value="14.png" type="text" />
     <button onclick="reset()">Reset</button>
     <button onclick="save_calibration_values()">Save</button>
     <button onclick="load_calibration_values()">Load</button>
@@ -41,7 +54,7 @@
 
     <script>
       function save_calibration_values(prefix = "tmp") {
-        let ids_to_save = ["white", "white-precision", "orange", "orange-precision"];
+        let ids_to_save = ["filename", "white", "white-precision", "orange", "orange-precision", "red", "red-precision"];
         let values = {};
         for (const id of ids_to_save) {
           let elem = document.getElementById(id);
@@ -73,18 +86,13 @@
         save_calibration_values();
       }
 
-      document.getElementById("white-precision").addEventListener("input", (e) => {
-        let precision = e.target.value;
-        change_precision_input("white", precision);
-      });
-
-      document.getElementById("orange-precision").addEventListener("input", (e) => {
-        let precision = e.target.value;
-        change_precision_input("orange", precision);
-      });
+      document.getElementById("white-precision").addEventListener("input", e => change_precision_input("white", e.target.value));
+      document.getElementById("orange-precision").addEventListener("input", e => change_precision_input("orange", e.target.value));
+      document.getElementById("red-precision").addEventListener("input", e => change_precision_input("red", e.target.value));
 
       document.getElementById('white').addEventListener('input', () => save_calibration_values());
       document.getElementById('orange').addEventListener('input', () => save_calibration_values());
+      document.getElementById('red').addEventListener('input', () => save_calibration_values());
 
       let deb = false;
       let awaiting = false;
@@ -116,10 +124,15 @@
         }
         values = JSON.parse(values);
 
-        let white = hex_to_rgb(values.white);
-        let orange = hex_to_rgb(values.orange);
+        let { filename, white, orange, red } = values;
+        white = white.split('#')[1];
+        orange = orange.split('#')[1];
+        red = red.split('#')[1];
 
-        let res = await fetch(`/go?wr=${white.r}&wg=${white.g}&wb=${white.b}&or=${orange.r}&og=${orange.g}&ob=${orange.b}&wp=${values["white-precision"]}&op=${values["orange-precision"]}`);
+
+        let res = await fetch(`/obstacles?filename=${filename}&white=${white}&orange=${orange}&red=${red}&wp=${values["white-precision"]}&op=${values["orange-precision"]}&rp=${values["red-precision"]}`);
+
+        let balls_res = await fetch(`/balls?filename=${filename}`);
 
         let img = await fetch("/latest.png");
 
@@ -141,14 +154,12 @@
         localStorage.clear();
         localStorage.setItem(
           "ic_saved_values",
-          JSON.stringify({ white: "#c8c8c8", "white-precision": "10", orange: "#be648c", "orange-precision": "10" }),
+          JSON.stringify({ filename: "14.jpg", white: "#c8c8c8", "white-precision": "10", orange: "#be648c", "orange-precision": "10" }),
         );
         load_calibration_values("ic");
-        go();
       }
 
       load_calibration_values();
-      go(); // load the image instantly
     </script>
   </body>
 </html>
