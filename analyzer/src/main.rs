@@ -58,7 +58,7 @@ impl Color {
     fn rgb(&self) -> Rgb<u8> {
         match self {
             Color::White => Rgb([200, 200, 250]),
-            Color::Orange => Rgb([255, 165, 0]),
+            Color::Orange => Rgb([255, 165, 80]),
             Color::Red => Rgb([255, 125, 20]),
             Color::Debug => Rgb([222, 193, 132]),
         }
@@ -203,7 +203,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let img = original_img.clone();
 
 
-    
+
     let mut state = State {
         original_img,
         img,
@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             orange,
             orange_precision: op,
             red,
-            red_precision: rp, 
+            red_precision: rp,
         },
         targets: Targets(vec![
             BetterTarget { color: Color::White, target_hex: Hex::new(white_hex), precision: wp },
@@ -225,7 +225,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
 
-   
+
     state
         .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
         .group_marks() // grupperer pixels som ligger op ad hinanden
@@ -233,10 +233,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .find_borders();
 
 
-    state.draw_mark(1500, 400, 10, Color::Debug);
+    // state.draw_mark(1500, 400, 10, Color::Debug);
 
     state.save();
-    
+
     println!("executed in: {}ms", now.elapsed().as_millis());
     Ok(())
 }
@@ -386,10 +386,10 @@ impl State {
         // let mut groups_to_render = Vec::new();
 
         self.groupings.retain(|g| g.volume() > 200 );
-        
+
         for group in &self.groupings.clone() {
             if group.color == Color::Red && group.volume() < 15000 { continue }
-            
+
             self.draw_group(group);
             println!("{:#?} Group has volume: {}", group.color, group.volume());
         }
@@ -398,7 +398,7 @@ impl State {
         // let group = self.groupings.iter().nth(4);
         // let group = group.unwrap().clone();
         // self.draw_group(&group);
-        
+
 
         self
     }
@@ -424,7 +424,7 @@ impl State {
         let mut left = Position::new(MAX, MAX);
         let mut top = Position::new(0, MAX);
         let mut bottom = Position::new(0, 0);
-        
+
         for (pos, _) in &group_to_inspect.marks {
             if pos.y < top.y { top = pos.clone() }
             if pos.y > bottom.y { bottom = pos.clone() }
@@ -456,7 +456,7 @@ impl State {
         let (width, height) = (width as i32, height as i32);
 
         let group_to_inspect = self.groupings.first().unwrap();
-        
+
         // Det bagerste navn fortæller prioriteten.
         // Dvs. top_right er i top området og vi forsøger at finde den mest til højre
         let mut top_right = Position::new(0, height);
@@ -516,7 +516,7 @@ impl State {
 
         self
     }
-    
+
 
     fn scan_for_marks(&mut self) -> &mut Self {
         let (width, height) = self.original_img.dimensions();
