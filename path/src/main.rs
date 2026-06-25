@@ -270,8 +270,15 @@ pub fn calc_route(
                 let normalized =
                     (WALL_BUFFER - nearest_wall) as f32
                         / WALL_BUFFER as f32;
+                // Wall weight 50000 -> 70000 (exponent kept QUARTIC, WALL_BUFFER
+                // kept 350). Sweep-verified against the real scene: switching to
+                // quadratic and/or widening the buffer made the squared-metric
+                // 1000-cap search wander and CAP OUT (no route -> stall). This
+                // modest bump keeps every ball + a 50px-from-wall ball FOUND
+                // while raising min wall clearance 138->150px and leaving the
+                // worst route-end at ~146px (< APPROACH_DISTANCE). Still SOFT.
                 obstacle_cost +=
-                    (normalized.powf(4.0) * 50000.0) as i32;
+                    (normalized.powf(4.0) * 70000.0) as i32;
             }
             // Distance to center obstacle
             let cross_dist_sq = dist_to_rect(n, &bounds.cross);
@@ -391,5 +398,8 @@ fn obstacle_penalty(dist_sq: i32, safety_radius: i32) -> i32 {
     let normalized =
         (safety_radius as f32 - dist) / safety_radius as f32;
 
-    (normalized.powf(4.0) * 50000.0) as i32
+    // Cross penalty SYNCED to the live analyzer (analyzer/src/path.rs): exponent
+    // 7.8, weight 500000 -- the branch's own stronger anti-cross-hitting tuning,
+    // kept so this offline route visualizer matches the hardware.
+    (normalized.powf(7.8) * 500000.0) as i32
 }

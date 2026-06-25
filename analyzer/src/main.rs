@@ -283,6 +283,10 @@ fn main() -> opencv::Result<()> {
 
     let mut target = None;
 
+    // Last successfully-detected obstacle bounds. Walls and the cross are STATIC
+    // in the arena, so we cache them and reuse on frames where detection drops a
+    // blob, instead of panicking. Stays None until the border is seen once.
+    let mut last_obst_bounds: Option<ObstacleBounds> = None;
 
 
     loop {
@@ -417,11 +421,18 @@ fn main() -> opencv::Result<()> {
 
         let head = state.get_car_direction();
         let balls = state.get_balls();
-        let obstacles = state.get_obstacles();
-        let obst_bounds = ObstacleBounds {
-            cross: bounds(&obstacles.cross),
-            walls: bounds(&obstacles.walls),
-        };
+        // Obstacle bounds (walls + cross AABBs). Walls and the cross are STATIC,
+        // so cache the last good bounds and reuse them on frames where detection
+        // momentarily drops a blob. Previously get_obstacles() and bounds()
+        // panicked (.unwrap()) whenever <2 groups survived or a point cloud was
+        // empty, crashing the whole loop ("robot doesn't exist").
+        if let Some(obstacles) = state.get_obstacles() {
+            if let (Some(walls), Some(cross)) =
+                (bounds(&obstacles.walls), bounds(&obstacles.cross))
+            {
+                last_obst_bounds = Some(ObstacleBounds { walls, cross });
+            }
+        }
 
         if target.is_none() {
             target = find_nearest_ball(&car_center, &balls);
@@ -430,8 +441,8 @@ fn main() -> opencv::Result<()> {
                 program_state = ProgramState::EndGoToPos;
             }
         }
-        else {
-            let route = calc_route(&car_center, &target.unwrap(), &obst_bounds);
+        else if let Some(obst_bounds) = &last_obst_bounds {
+            let route = calc_route(&car_center, &target.unwrap(), obst_bounds);
             draw_route_stream(&mut frame, &route.1)?;
 
             draw(&mut frame, target.unwrap(), (200.0, 50.0, 255.0))?;
@@ -485,6 +496,53 @@ fn main() -> opencv::Result<()> {
 
             let threshold = 7.0_f32; // originally 15.0
 
+            // --- Run-state suction-mouth precision model (LINEAR pixels) ----------
+            // These quantities are dot/cross products of pixel vectors and are
+            // INDEPENDENT of pythagoras() (which returns SQUARED distance and only
+            // gates `close_enough`). They refine the final ball pickup so a single
+            // fast frame cannot overshoot the suction window.
+            //
+            // Calibration:
+            //   SUCK_OFFSET           = px from the car_center marker to the physical
+            //                           suction mouth, measured ALONG heading (fx,fy).
+            //                           Calibrate by eyeballing the blue dot drawn below.
+            //   SUCK_TOLERANCE        = how far (px) the ball may sit ahead of the mouth
+            //                           and still count as captured (signed along heading).
+            //   SUCK_LATERAL_TOLERANCE= max cross-track (px) offset of the ball from the
+            //                           heading line for a clean grab.
+            //   CREEP_DISTANCE        = px gap at which we stop driving continuous forward
+            //                           and start pulsing forward<->stop.
+            const SUCK_OFFSET: f32 = 70.0;
+            const SUCK_TOLERANCE: f32 = 35.0;
+            const SUCK_LATERAL_TOLERANCE: f32 = 40.0;
+            const CREEP_DISTANCE: f32 = 60.0;
+
+            // get_car_direction() returns Position{0,0} when the CarDirection marker is
+            // missing; with no valid heading the mouth projection is garbage, so we must
+            // never fire SUCK on a lost heading.
+            let head_valid = head.x != 0 || head.y != 0;
+
+            // Project the mouth from car_center along the (already-normalized) heading.
+            let mouth = Position::new(
+                car_center.x + (fx * SUCK_OFFSET) as i32,
+                car_center.y + (fy * SUCK_OFFSET) as i32,
+            );
+            // Blue marker: where the planner thinks the mouth is. Used to calibrate SUCK_OFFSET.
+            draw(&mut frame, mouth, (0.0, 0.0, 255.0))?;
+
+            // Ball relative to the mouth, decomposed onto the heading frame.
+            let ball = target.unwrap();
+            let bx = (ball.x - mouth.x) as f32;
+            let by = (ball.y - mouth.y) as f32;
+            // Signed gap ALONG heading: >0 = ball still ahead of the mouth, <=0 = at/past it.
+            let forward_gap = bx * fx + by * fy;
+            // Cross-track magnitude: lateral offset of the ball from the heading line.
+            let lateral = (bx * fy - by * fx).abs();
+
+            // Mouth is on/past the ball within tolerances AND heading is trustworthy.
+            let on_ball =
+                head_valid && forward_gap <= SUCK_TOLERANCE && lateral <= SUCK_LATERAL_TOLERANCE;
+            // ---------------------------------------------------------------------
 
             if program_state != ProgramState::Config {
                 if angle.abs() > threshold.to_radians() {
@@ -499,17 +557,37 @@ fn main() -> opencv::Result<()> {
                     if close_enough {
                         match program_state {
                             ProgramState::Run => {
-                                println!("SUCK!");
+                                if on_ball {
+                                    println!("SUCK!");
 
-                                send_command(&mut ev3, "stop", &mut last_command);
-                                std::thread::sleep(Duration::from_secs(3));
+                                    send_command(&mut ev3, "stop", &mut last_command);
+                                    std::thread::sleep(Duration::from_secs(3));
 
-                                // send_command(&mut ev3, "backward", &mut last_command);
-                                // std::thread::sleep(Duration::from_secs_f32(1.0));
-                                // send_command(&mut ev3, "stop", &mut last_command);
-                                send_command(&mut pi, "stop", &mut pi_last_command);
+                                    // send_command(&mut ev3, "backward", &mut last_command);
+                                    // std::thread::sleep(Duration::from_secs_f32(1.0));
+                                    // send_command(&mut ev3, "stop", &mut last_command);
+                                    // KEEP the pre-emptive pump running: do NOT re-send pi "start" here.
+                                    send_command(&mut pi, "stop", &mut pi_last_command);
 
-                                target = None;
+                                    target = None;
+                                } else if forward_gap > CREEP_DISTANCE {
+                                    // Still far inside the close_enough bubble: drive continuous
+                                    // forward for speed (send_command dedups, so this is a no-op
+                                    // once last_command == "forward").
+                                    println!("CREEP FORWARD");
+                                    send_command(&mut ev3, "forward", &mut last_command);
+                                } else {
+                                    // Final few px: PULSE forward<->stop so one fast frame can't
+                                    // skip past the SUCK window. Alternate via last_command (which
+                                    // send_command flips each call), guaranteeing a real toggle.
+                                    if last_command == "forward" {
+                                        println!("CREEP PULSE STOP");
+                                        send_command(&mut ev3, "stop", &mut last_command);
+                                    } else {
+                                        println!("CREEP PULSE FORWARD");
+                                        send_command(&mut ev3, "forward", &mut last_command);
+                                    }
+                                }
                             }
                             ProgramState::EndGoToPos => {
                                 send_command(&mut ev3, "stop", &mut pi_last_command);
@@ -534,6 +612,13 @@ fn main() -> opencv::Result<()> {
                     }
                 }
             }
+        }
+        else {
+            // target is set but no obstacle bounds have ever been detected (the
+            // static walls/cross blob has been missing on every frame so far).
+            // Skip routing/motion this frame instead of panicking; it self-heals
+            // the moment the border is seen once, since bounds are cached.
+            println!("waiting for obstacle detection...");
         }
 
 
@@ -605,11 +690,22 @@ impl Grouping {
     }
 
     fn center(&self) -> Position {
-        let max_x = self.marks.keys().map(|p| p.x).max().unwrap_or(0);
-        let max_y = self.marks.keys().map(|p| p.y).max().unwrap_or(0);
-        let min_x = self.marks.keys().map(|p| p.x).min().unwrap_or(0);
-        let min_y = self.marks.keys().map(|p| p.y).min().unwrap_or(0);
-        Position { x: (max_x + min_x) / 2, y: (max_y + min_y) / 2 }
+        // Pixel CENTROID (mean of all member pixels) instead of the AABB
+        // midpoint. (max+min)/2 is set by the 2 extreme pixels, so a single
+        // stray/outlier pixel or an asymmetric blob shifts the reported center
+        // by tens of px -- the close-range aim error that makes the suction
+        // miss. The mean averages over all N matched pixels, so the same stray
+        // moves the center by only offset/N.
+        let n = self.marks.len() as i64;
+        if n == 0 {
+            return Position { x: 0, y: 0 };
+        }
+        let (mut sx, mut sy) = (0i64, 0i64);
+        for p in self.marks.keys() {
+            sx += p.x as i64;
+            sy += p.y as i64;
+        }
+        Position { x: (sx / n) as i32, y: (sy / n) as i32 }
     }
 }
 
@@ -648,26 +744,15 @@ impl State {
         balls
     }
 
-    fn get_obstacles(&mut self) -> Obstacles {
-        let walls: Vec<Position> = self
-            .groupings
-            .first()
-            .unwrap()
-            .marks
-            .clone()
-            .into_keys()
-            .collect();
-        let cross: Vec<Position> = self
-            .groupings
-            .iter()
-            .nth(1)
-            .unwrap()
-            .marks
-            .clone()
-            .into_keys()
-            .collect();
+    fn get_obstacles(&mut self) -> Option<Obstacles> {
+        // groupings is sorted by descending volume in find_borders(): [0] is the
+        // largest blob (walls), [1] is the second (cross). Return None instead
+        // of panicking when a frame doesn't yield at least 2 obstacle groups
+        // (glare/occlusion); the caller reuses the last good bounds.
+        let walls: Vec<Position> = self.groupings.first()?.marks.keys().copied().collect();
+        let cross: Vec<Position> = self.groupings.get(1)?.marks.keys().copied().collect();
 
-        Obstacles { walls, cross }
+        Some(Obstacles { walls, cross })
     }
 
     fn group_marks(&mut self) -> &mut Self {
@@ -705,8 +790,18 @@ impl State {
                             continue;
                         }
 
-                        if !self.marks.contains_key(&neighbor) {
-                            continue;
+                        // Color-aware flood fill: only merge a neighbour that
+                        // shares the SAME color as the seed. The previous test
+                        // merged any 8-connected mark regardless of color, so a
+                        // white ball touching the red wall/cross got absorbed
+                        // into one grouping and its center() became a phantom
+                        // point -- the robot then aimed short / into the wall.
+                        // start_mark is in scope from the outer
+                        // `for (start_pos, start_mark) in &self.marks` loop;
+                        // Color is Copy so this is a shared borrow + copy.
+                        match self.marks.get(&neighbor) {
+                            Some(m) if m.color == start_mark.color => {}
+                            _ => continue,
                         }
 
                         taken.insert(neighbor.clone(), ());
@@ -753,7 +848,13 @@ impl State {
     }
 
     fn find_cross(&mut self) -> &mut Self {
-        let group_to_inspect = self.groupings.iter().nth(1).unwrap();
+        // Visualization-only (draws cross arm-tips into the working image). Bail
+        // out drawing nothing, instead of panicking, when fewer than 2 groups
+        // survive filtering on a frame.
+        let group_to_inspect = match self.groupings.get(1) {
+            Some(g) => g,
+            None => return self,
+        };
 
         let mut right = Position::new(0, 0);
         let mut left = Position::new(MAX, MAX);
@@ -796,7 +897,12 @@ impl State {
         let (width, height) = self.img.dimensions();
         let (width, height) = (width as i32, height as i32);
 
-        let group_to_inspect = self.groupings.first().unwrap();
+        // Visualization-only (draws border corners into the working image). Bail
+        // out instead of panicking when no group exists on a frame.
+        let group_to_inspect = match self.groupings.first() {
+            Some(g) => g,
+            None => return self,
+        };
 
         // Det bagerste navn fortæller prioriteten.
         // Dvs. top_right er i top området og vi forsøger at finde den mest til højre
