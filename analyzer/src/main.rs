@@ -11,6 +11,7 @@ use std::time::Duration;
 
 pub mod path;
 pub mod control;
+pub mod homography;
 
 use opencv::{core, highgui, imgproc, prelude::*, types, videoio};
 
@@ -33,6 +34,12 @@ struct State {
     targets: Targets,
     marks: HashMap<Position, Mark>,
     groupings: Vec<Grouping>,
+    // Last 4 field-border corners [top_left, top_right, bottom_left,
+    // bottom_right] in image pixels, stored by find_map_border ONLY when all
+    // four are real detections (none still at its init sentinel). None until
+    // the border has been seen cleanly once. Used to build/refresh the cached
+    // ground homography in main(); never read by routing.
+    last_corners: Option<[Position; 4]>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
@@ -278,10 +285,29 @@ fn main() -> opencv::Result<()> {
         ]),
         marks: std::collections::HashMap::new(),
         groupings: Vec::new(),
+        last_corners: None,
     };
 
     let mut target = None;
 
+    // Last successfully-detected obstacle bounds. Walls and the cross are STATIC
+    // in the arena, so we cache them and reuse on frames where detection drops a
+    // blob, instead of panicking. Stays None until the border is seen once.
+    let mut last_obst_bounds: Option<ObstacleBounds> = None;
+
+    // Cached GROUND-PLANE HOMOGRAPHY and the corner set it was built from.
+    // Like last_obst_bounds, the field border is STATIC, so we solve the
+    // homography once the corners are seen cleanly and reuse it. Recompute only
+    // when not yet set OR a corner has moved more than CORNER_MOVE_SQ (squared
+    // px) since the cached build AND the rebuild SUCCEEDS — a failed rebuild
+    // (degenerate/flipped/slim/singular) keeps the last good H rather than
+    // caching a bad one or stalling, so the cache can never latch a wrong H.
+    let mut ground_h: Option<homography::Homography> = None;
+    let mut h_corners: Option<[Position; 4]> = None;
+    // Per-corner move threshold (squared px) to trigger a homography rebuild.
+    // Above per-frame border jitter, below a real re-aim. Tune if the border
+    // detection is noisy. ~30px => 900.
+    const CORNER_MOVE_SQ: i32 = 30 * 30;
 
 
     loop {
@@ -405,24 +431,78 @@ fn main() -> opencv::Result<()> {
         // Get car from picture!
         let mut car_center = state.get_car_center();
 
-        if last_car_pos.x == 0 {
+        // Magnitude-based jitter clamp.
+        // OLD BUG: the signed `> 10` test only caught jumps toward +x/+y
+        // (never -x/-y), used a tiny 10px threshold the car EXCEEDS while
+        // driving, and on a real move both rejected it AND wrote the stale
+        // value back into last_car_pos -> the car position froze permanently
+        // once it moved fast, poisoning the heading vector and the route.
+        // NEW: reject only true outliers by squared distance, and update
+        // last_car_pos ONLY with the ACCEPTED value so a real drive is never
+        // frozen. JITTER_REJECT_SQ must exceed the largest legitimate
+        // per-frame travel (measure on the robot).
+        const JITTER_REJECT_SQ: i32 = 60 * 60; // ~60px/frame; tune above real max travel
+        if last_car_pos.x == 0 && last_car_pos.y == 0 {
             last_car_pos = car_center;
-        }
-        else {
-            // check if car has moved too much, if so, then reverse it
-            if car_center.x - last_car_pos.x > 10 || car_center.y - last_car_pos.y > 10 {
-                car_center = last_car_pos;
+        } else {
+            let d2 = (car_center.x - last_car_pos.x).pow(2)
+                + (car_center.y - last_car_pos.y).pow(2);
+            if d2 > JITTER_REJECT_SQ {
+                car_center = last_car_pos; // reject this frame's outlier
+            } else {
+                last_car_pos = car_center; // accept and remember
             }
-            last_car_pos = car_center;
         }
 
         let head = state.get_car_direction();
         let balls = state.get_balls();
-        let obstacles = state.get_obstacles();
-        let obst_bounds = ObstacleBounds {
-            cross: bounds(&obstacles.cross),
-            walls: bounds(&obstacles.walls),
-        };
+        // Obstacle bounds (walls + cross AABBs). Walls and the cross are STATIC,
+        // so cache the last good bounds and reuse them on frames where detection
+        // momentarily drops a blob. Previously get_obstacles() and bounds()
+        // panicked (.unwrap()) whenever <2 groups survived or a point cloud was
+        // empty, crashing the whole loop ("robot doesn't exist").
+        if let Some(obstacles) = state.get_obstacles() {
+            if let (Some(walls), Some(cross)) =
+                (bounds(&obstacles.walls), bounds(&obstacles.cross))
+            {
+                last_obst_bounds = Some(ObstacleBounds { walls, cross });
+            }
+        }
+
+        // Refresh the cached ground homography from the latest validated border
+        // corners. Rebuild only when unset or a corner moved past the threshold,
+        // and ONLY commit a rebuild that actually succeeds: from_field_corners
+        // returns None on a degenerate/flipped/slim/singular quad, in which case
+        // we keep the last good H (or stay None and fall back to pixel space).
+        if let Some(corners) = state.last_corners {
+            let need_rebuild = match h_corners {
+                None => true,
+                Some(prev) => {
+                    let mut moved = false;
+                    for i in 0..4 {
+                        let dx = corners[i].x - prev[i].x;
+                        let dy = corners[i].y - prev[i].y;
+                        if dx * dx + dy * dy > CORNER_MOVE_SQ {
+                            moved = true;
+                        }
+                    }
+                    moved
+                }
+            };
+            if ground_h.is_none() || need_rebuild {
+                let pts = [
+                    (corners[0].x as f64, corners[0].y as f64),
+                    (corners[1].x as f64, corners[1].y as f64),
+                    (corners[2].x as f64, corners[2].y as f64),
+                    (corners[3].x as f64, corners[3].y as f64),
+                ];
+                if let Some(h) = homography::from_field_corners(pts) {
+                    ground_h = Some(h);
+                    h_corners = Some(corners);
+                }
+                // else: keep last good ground_h / h_corners unchanged.
+            }
+        }
 
 
 
@@ -433,27 +513,177 @@ fn main() -> opencv::Result<()> {
                 program_state = ProgramState::EndGoToPos;
             }
         }
-        else {
-            let route = calc_route(&car_center, &target.unwrap(), &obst_bounds);
+        else if let Some(obst_bounds) = &last_obst_bounds {
+            let route = calc_route(&car_center, &target.unwrap(), obst_bounds);
             draw_route_stream(&mut frame, &route.1)?;
 
 
             let next = next_point(&car_center, &route.1);
 
 
+            // ---- Final-approach / suction-mouth tunables (CALIBRATE) ----
+            // SUCK_OFFSET: px from car_center forward to the physical mouth,
+            //   along the heading. MEASURE on the robot (blue marker drawn below).
+            // SUCK_TOLERANCE: along-heading gap (px) at/below which SUCK fires
+            //   once the mouth has reached OR PASSED the ball. Set ABOVE the
+            //   per-frame creep travel so a frame cannot skip the trigger.
+            // SUCK_LATERAL_TOLERANCE: max cross-track ball offset to allow SUCK.
+            // APPROACH_DISTANCE: px straight-line car->ball range inside which we
+            //   aim straight at the ball and bypass A*/obstacle weighting so a
+            //   near-wall ball (~50px) stays reachable. Must exceed the planner's
+            //   worst route-end (~146px measured) and its 80px early-exit.
+            // CLOSE_RADIUS: interlock -- in Run, only honour close_enough when
+            //   genuinely within this straight-line range, so a CAPPED A* route
+            //   (route_lenth==0 while still far) cannot bee-line at the ball
+            //   through obstacles.
+            const SUCK_OFFSET: f32 = 70.0;
+            const SUCK_TOLERANCE: f32 = 35.0;
+            const SUCK_LATERAL_TOLERANCE: f32 = 40.0;
+            const APPROACH_DISTANCE: i32 = 200;
+            const CLOSE_RADIUS: i32 = 100;
+
             let dist_threshold = 1;
             // Når vi til sidst bare skal vende bagenden til, så sørger vi for den tror den er tæt nok på,
             // så den går direkte i gang med retningskalibrering.
-            let close_enough = next.route_lenth < dist_threshold || program_state == ProgramState::EndTurnAround;
+            // route_close keeps the ORIGINAL meaning (route_lenth==0 or EndTurnAround).
+            let route_close = next.route_lenth < dist_threshold || program_state == ProgramState::EndTurnAround;
 
-            // Current heading vector
+            // Current heading vector (normalized once).
             let fx = (head.x - car_center.x) as f32;
             let fy = (head.y - car_center.y) as f32;
+            let (fx, fy) = normalize(fx, fy);
 
-            // Sørger for at vi peger mod bolden, når vi kommer tæt nok på
-            let target_pos = match close_enough {
-                true => target.unwrap(),
-                false => next.pos,
+            let ball = target.unwrap();
+
+            // ---- ROBOT-MARKER HEIGHT-CORRECTION tunables (DEFAULT OFF) ----
+            // MARKER_K == 1.0 disables the correction (identity), so the default
+            // is ground-homography-only — a safe improvement needing zero extra
+            // measurements. To enable: set MARKER_K = (H_cam - h)/H_cam (camera
+            // height vs marker height, both above the floor; 0<k<1) and
+            // MARKER_NADIR to the RECTIFIED image of the camera nadir (the floor
+            // point directly under the lens) — see homography.rs::correct_marker.
+            const MARKER_K: f64 = 1.0;
+            const MARKER_NADIR: (f64, f64) = (0.0, 0.0);
+
+            // RECTIFIED POSE: if the ground homography is calibrated, map the
+            // ball (on the floor) and the robot markers into rectified ground
+            // coordinates. The two markers are ELEVATED, so height-correct them
+            // (identity while MARKER_K==1.0). If H is absent or ANY apply()
+            // returns None (degenerate/horizon), rect_pose stays None and the
+            // whole final approach falls back to the EXACT pixel path below.
+            // Tuple: (ball, car_center, head) in rectified f32 pixels.
+            let rect_pose: Option<((f32, f32), (f32, f32), (f32, f32))> = match &ground_h {
+                Some(h) => {
+                    let rb = h.apply(ball.x as f64, ball.y as f64);
+                    let rc = h.apply(car_center.x as f64, car_center.y as f64);
+                    let rh = h.apply(head.x as f64, head.y as f64);
+                    match (rb, rc, rh) {
+                        (Some(b), Some(c), Some(d)) => {
+                            let c = homography::correct_marker(c, MARKER_NADIR, MARKER_K);
+                            let d = homography::correct_marker(d, MARKER_NADIR, MARKER_K);
+                            Some((
+                                (b.0 as f32, b.1 as f32),
+                                (c.0 as f32, c.1 as f32),
+                                (d.0 as f32, d.1 as f32),
+                            ))
+                        }
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+
+            // Straight-line car->ball distance. PIXEL value (used for the pixel
+            // fallback and unchanged when no rectified pose is available).
+            let to_ball_sq = (ball.x - car_center.x).pow(2) + (ball.y - car_center.y).pow(2);
+
+            // Rectified straight-line distance (f32) when available, else None.
+            let to_ball_sq_rect: Option<f32> = rect_pose.map(|(b, c, _)| {
+                let dx = b.0 - c.0;
+                let dy = b.1 - c.1;
+                dx * dx + dy * dy
+            });
+
+            // INTERLOCK: in the Run state a capped route can report
+            // route_lenth==0 while the car is still far from the ball. Only
+            // honour close_enough there when actually within CLOSE_RADIUS, so a
+            // failed search never collapses into a straight bee-line through
+            // obstacles. End* states keep the ORIGINAL route_close unchanged.
+            // The CLOSE_RADIUS test uses rectified distance when available, else
+            // the EXACT current integer pixel comparison.
+            let within_close = match to_ball_sq_rect {
+                Some(r) => r < (CLOSE_RADIUS * CLOSE_RADIUS) as f32,
+                None => to_ball_sq < CLOSE_RADIUS * CLOSE_RADIUS,
+            };
+            let close_enough = if program_state == ProgramState::Run {
+                route_close && within_close
+            } else {
+                route_close
+            };
+
+            // Final approach: Run-only, within APPROACH_DISTANCE. Aims straight
+            // at the ball (bypassing the A* next point) so obstacle weighting
+            // cannot bend the last leg -> a ~50px-from-wall ball is reachable.
+            // Gate computed in RECTIFIED coords when available, else the EXACT
+            // current integer pixel comparison.
+            let within_approach = match to_ball_sq_rect {
+                Some(r) => r < (APPROACH_DISTANCE * APPROACH_DISTANCE) as f32,
+                None => to_ball_sq < APPROACH_DISTANCE * APPROACH_DISTANCE,
+            };
+            let final_approach = program_state == ProgramState::Run && within_approach;
+
+            // Lost-direction guard: get_car_direction() returns Position{0,0}
+            // (image ORIGIN), NOT car_center, when the marker is missing. Test
+            // that sentinel on the PIXEL head so a lost heading can never trigger
+            // SUCK on a garbage direction or project the mouth toward the origin.
+            let head_valid = head.x != 0 || head.y != 0;
+
+            // Project the physical mouth forward from car_center along heading.
+            // PIXEL mouth, still drawn for the operator overlay regardless of H.
+            let mouth = Position {
+                x: car_center.x + (fx * SUCK_OFFSET) as i32,
+                y: car_center.y + (fy * SUCK_OFFSET) as i32,
+            };
+            draw(&mut frame, mouth, (0.0, 0.0, 255.0))?;
+
+            // AT-OR-BEYOND trigger: signed along-heading distance from the mouth
+            // to the ball (positive = ball still ahead of the mouth) and the
+            // perpendicular (cross-track) offset. SUCK fires when the mouth has
+            // reached or passed the ball (forward_gap <= SUCK_TOLERANCE, allows
+            // small negative = slight overshoot) and the lateral offset is
+            // small. This cannot be skipped by a single fast frame: once the
+            // mouth is at/after the ball the condition latches true instead of
+            // flipping the heading and oscillating.
+            //
+            // RECTIFIED branch: when a rectified pose exists, compute the heading,
+            // mouth, forward_gap and lateral entirely in rectified ground coords
+            // so parallax cannot skew the suck decision anywhere on the field.
+            // Otherwise fall back to the EXACT pixel expressions below.
+            let (forward_gap, lateral) = match rect_pose {
+                Some((b, c, d)) => {
+                    let (rfx, rfy) = normalize(d.0 - c.0, d.1 - c.1);
+                    let rmx = c.0 + rfx * SUCK_OFFSET;
+                    let rmy = c.1 + rfy * SUCK_OFFSET;
+                    let rbx = b.0 - rmx;
+                    let rby = b.1 - rmy;
+                    (rbx * rfx + rby * rfy, (rbx * rfy - rby * rfx).abs())
+                }
+                None => {
+                    let bx = (ball.x - mouth.x) as f32;
+                    let by = (ball.y - mouth.y) as f32;
+                    (bx * fx + by * fy, (bx * fy - by * fx).abs())
+                }
+            };
+            let on_ball = final_approach
+                && head_valid
+                && forward_gap <= SUCK_TOLERANCE
+                && lateral <= SUCK_LATERAL_TOLERANCE;
+
+            // In final approach (or End* close), aim DIRECTLY at the ball.
+            let target_pos = if close_enough || final_approach {
+                ball
+            } else {
+                next.pos
             };
 
 
@@ -464,13 +694,17 @@ fn main() -> opencv::Result<()> {
             let gx = (target_pos.x - car_center.x) as f32;
             let gy = (target_pos.y - car_center.y) as f32;
 
-            let (fx, fy) = normalize(fx, fy);
             let (gx, gy) = normalize(gx, gy);
 
             let angle = angle_between(fx, fy, gx, gy);
 
             let threshold = 7.0_f32; // originally 15.0
 
+            // Enter the aligned-action block on the original close_enough (for
+            // End* states this is the unchanged route_close) OR the Run final
+            // approach. The final_approach term can NEVER trigger an End* arm
+            // because it requires program_state == Run.
+            let act = close_enough || final_approach;
 
             if program_state != ProgramState::Config {
                 if angle.abs() > threshold.to_radians() {
@@ -482,20 +716,37 @@ fn main() -> opencv::Result<()> {
                         send_command(&mut ev3, "left", &mut last_command);
                     }
                 } else {
-                    if close_enough {
+                    if act {
                         match program_state {
                             ProgramState::Run => {
-                                println!("SUCK!");
+                                if on_ball {
+                                    println!("SUCK!");
 
-                                send_command(&mut pi, "start", &mut pi_last_command);
-                                send_command(&mut ev3, "stop", &mut last_command);
-                                std::thread::sleep(Duration::from_secs(3));
+                                    send_command(&mut pi, "start", &mut pi_last_command);
+                                    send_command(&mut ev3, "stop", &mut last_command);
+                                    std::thread::sleep(Duration::from_secs(3));
 
-                                send_command(&mut ev3, "backward", &mut last_command);
-                                std::thread::sleep(Duration::from_secs_f32(1.0));
-                                send_command(&mut ev3, "stop", &mut last_command);
+                                    send_command(&mut ev3, "backward", &mut last_command);
+                                    std::thread::sleep(Duration::from_secs_f32(1.0));
+                                    send_command(&mut ev3, "stop", &mut last_command);
 
-                                target = None;
+                                    target = None;
+                                } else {
+                                    // PULSED creep: send_command latches, so
+                                    // continuous "forward" runs the motor full
+                                    // speed and a single accepted ~60px frame
+                                    // could jump the SUCK window. Alternate
+                                    // forward<->stop so per-frame travel stays
+                                    // well below SUCK_TOLERANCE; the at-or-beyond
+                                    // trigger then cannot be skipped.
+                                    if last_command == "forward" {
+                                        println!("CREEP-BRAKE");
+                                        send_command(&mut ev3, "stop", &mut last_command);
+                                    } else {
+                                        println!("CREEP");
+                                        send_command(&mut ev3, "forward", &mut last_command);
+                                    }
+                                }
                             }
                             ProgramState::EndGoToPos =>
                                 program_state = ProgramState::EndTurnAround,
@@ -510,6 +761,13 @@ fn main() -> opencv::Result<()> {
                     }
                 }
             }
+        }
+        else {
+            // target is set but no obstacle bounds have ever been detected (the
+            // static walls/cross blob has been missing on every frame so far).
+            // Skip routing/motion this frame instead of panicking; it self-heals
+            // the moment the border is seen once, since bounds are cached.
+            println!("waiting for obstacle detection...");
         }
 
 
@@ -574,11 +832,22 @@ impl Grouping {
     }
 
     fn center(&self) -> Position {
-        let max_x = self.marks.keys().map(|p| p.x).max().unwrap_or(0);
-        let max_y = self.marks.keys().map(|p| p.y).max().unwrap_or(0);
-        let min_x = self.marks.keys().map(|p| p.x).min().unwrap_or(0);
-        let min_y = self.marks.keys().map(|p| p.y).min().unwrap_or(0);
-        Position { x: (max_x + min_x) / 2, y: (max_y + min_y) / 2 }
+        // Pixel CENTROID (mean of all member pixels) instead of the AABB
+        // midpoint. (max+min)/2 is set by the 2 extreme pixels, so a single
+        // stray/outlier pixel or an asymmetric blob shifts the reported center
+        // by tens of px -- the close-range aim error that makes the suction
+        // miss. The mean averages over all N matched pixels, so the same stray
+        // moves the center by only offset/N.
+        let n = self.marks.len() as i64;
+        if n == 0 {
+            return Position { x: 0, y: 0 };
+        }
+        let (mut sx, mut sy) = (0i64, 0i64);
+        for p in self.marks.keys() {
+            sx += p.x as i64;
+            sy += p.y as i64;
+        }
+        Position { x: (sx / n) as i32, y: (sy / n) as i32 }
     }
 }
 
@@ -617,26 +886,15 @@ impl State {
         balls
     }
 
-    fn get_obstacles(&mut self) -> Obstacles {
-        let walls: Vec<Position> = self
-            .groupings
-            .first()
-            .unwrap()
-            .marks
-            .clone()
-            .into_keys()
-            .collect();
-        let cross: Vec<Position> = self
-            .groupings
-            .iter()
-            .nth(1)
-            .unwrap()
-            .marks
-            .clone()
-            .into_keys()
-            .collect();
+    fn get_obstacles(&mut self) -> Option<Obstacles> {
+        // groupings is sorted by descending volume in find_borders(): [0] is the
+        // largest blob (walls), [1] is the second (cross). Return None instead
+        // of panicking when a frame doesn't yield at least 2 obstacle groups
+        // (glare/occlusion); the caller reuses the last good bounds.
+        let walls: Vec<Position> = self.groupings.first()?.marks.keys().copied().collect();
+        let cross: Vec<Position> = self.groupings.get(1)?.marks.keys().copied().collect();
 
-        Obstacles { walls, cross }
+        Some(Obstacles { walls, cross })
     }
 
     fn group_marks(&mut self) -> &mut Self {
@@ -674,8 +932,18 @@ impl State {
                             continue;
                         }
 
-                        if !self.marks.contains_key(&neighbor) {
-                            continue;
+                        // Color-aware flood fill: only merge a neighbour that
+                        // shares the SAME color as the seed. The previous test
+                        // merged any 8-connected mark regardless of color, so a
+                        // white ball touching the red wall/cross got absorbed
+                        // into one grouping and its center() became a phantom
+                        // point -- the robot then aimed short / into the wall.
+                        // start_mark is in scope from the outer
+                        // `for (start_pos, start_mark) in &self.marks` loop;
+                        // Color is Copy so this is a shared borrow + copy.
+                        match self.marks.get(&neighbor) {
+                            Some(m) if m.color == start_mark.color => {}
+                            _ => continue,
                         }
 
                         taken.insert(neighbor.clone(), ());
@@ -711,7 +979,13 @@ impl State {
     }
 
     fn find_cross(&mut self) -> &mut Self {
-        let group_to_inspect = self.groupings.iter().nth(1).unwrap();
+        // Visualization-only (draws cross arm-tips into the working image). Bail
+        // out drawing nothing, instead of panicking, when fewer than 2 groups
+        // survive filtering on a frame.
+        let group_to_inspect = match self.groupings.get(1) {
+            Some(g) => g,
+            None => return self,
+        };
 
         let mut right = Position::new(0, 0);
         let mut left = Position::new(MAX, MAX);
@@ -754,7 +1028,12 @@ impl State {
         let (width, height) = self.img.dimensions();
         let (width, height) = (width as i32, height as i32);
 
-        let group_to_inspect = self.groupings.first().unwrap();
+        // Visualization-only (draws border corners into the working image). Bail
+        // out instead of panicking when no group exists on a frame.
+        let group_to_inspect = match self.groupings.first() {
+            Some(g) => g,
+            None => return self,
+        };
 
         // Det bagerste navn fortæller prioriteten.
         // Dvs. top_right er i top området og vi forsøger at finde den mest til højre
@@ -825,6 +1104,28 @@ impl State {
         let x = left_bottom.x + (left_top.x - left_bottom.x) / 2;
 
         self.draw_mark(x as u32, y as u32, 10, Color::White);
+
+        // HOMOGRAPHY CALIBRATION SOURCE: store the four band-filtered corners
+        // [top_left, top_right, bottom_left, bottom_right] for main() to build
+        // the ground homography from. Each was seeded to a frame-corner SENTINEL
+        // (top_left=(width,height), top_right=(0,height), bottom_left=(width,0),
+        // bottom_right=(0,0)); a corner still at its sentinel means NO detection
+        // in its quarter-band, so we refuse to store a sentinel-laced set and
+        // leave last_corners unchanged (main() then keeps the last good H or
+        // falls back to pixel space). The corners are Copy, so copy them out
+        // before assigning into self (no borrow conflict with group_to_inspect).
+        let tl = top_left;
+        let tr = top_right;
+        let bl = bottom_left;
+        let br = bottom_right;
+        let tl_ok = !(tl.x == width && tl.y == height);
+        let tr_ok = !(tr.x == 0 && tr.y == height);
+        let bl_ok = !(bl.x == width && bl.y == 0);
+        let br_ok = !(br.x == 0 && br.y == 0);
+        if tl_ok && tr_ok && bl_ok && br_ok {
+            self.last_corners = Some([tl, tr, bl, br]);
+        }
+
         self
     }
 

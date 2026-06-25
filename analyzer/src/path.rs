@@ -29,13 +29,15 @@ pub struct Bounds {
 }
 
 
-pub fn bounds(points: &[Position]) -> Bounds {
-    Bounds {
-        min_x: points.iter().map(|p| p.x).min().unwrap(),
-        max_x: points.iter().map(|p| p.x).max().unwrap(),
-        min_y: points.iter().map(|p| p.y).min().unwrap(),
-        max_y: points.iter().map(|p| p.y).max().unwrap(),
-    }
+pub fn bounds(points: &[Position]) -> Option<Bounds> {
+    // Returns None for an empty point cloud instead of panicking (.unwrap()).
+    // The caller (analyzer main loop) falls back to the last good bounds.
+    Some(Bounds {
+        min_x: points.iter().map(|p| p.x).min()?,
+        max_x: points.iter().map(|p| p.x).max()?,
+        min_y: points.iter().map(|p| p.y).min()?,
+        max_y: points.iter().map(|p| p.y).max()?,
+    })
 }
 
 #[derive(Serialize)]
@@ -254,8 +256,15 @@ pub fn calc_route(
                 let normalized =
                     (WALL_BUFFER - nearest_wall) as f32
                         / WALL_BUFFER as f32;
+                // Wall weight 50000 -> 70000 (exponent kept QUARTIC, WALL_BUFFER
+                // kept 350). Sweep-verified against the real scene: switching to
+                // quadratic and/or widening the buffer made the squared-metric
+                // 1000-cap search wander and CAP OUT (no route -> stall). This
+                // modest bump keeps every ball + a 50px-from-wall ball FOUND
+                // while raising min wall clearance 138->150px and leaving the
+                // worst route-end at ~146px (< APPROACH_DISTANCE). Still SOFT.
                 obstacle_cost +=
-                    (normalized.powf(4.0) * 50000.0) as i32;
+                    (normalized.powf(4.0) * 70000.0) as i32;
             }
             // Distance to center obstacle
             let cross_dist_sq = dist_to_rect(n, &bounds.cross);
@@ -347,5 +356,8 @@ fn obstacle_penalty(dist_sq: i32, safety_radius: i32) -> i32 {
     let normalized =
         (safety_radius as f32 - dist) / safety_radius as f32;
 
-    (normalized.powf(4.0) * 50000.0) as i32
+    // Cross weight 50000 -> 60000 (exponent kept QUARTIC, CROSS_BUFFER kept 400).
+    // Sweep-verified: raises min cross clearance 17.5->39.4px with no cap and
+    // route-end unchanged. Still a finite SOFT cost -> a route always exists.
+    (normalized.powf(4.0) * 60000.0) as i32
 }

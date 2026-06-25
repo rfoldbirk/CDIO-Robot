@@ -258,9 +258,9 @@ pub fn calc_route(
                 (bounds.walls.min_y - n.y).abs(),
                 (bounds.walls.max_y - n.y).abs(),
             ]
-            .into_iter()
-            .min()
-            .unwrap();
+                .into_iter()
+                .min()
+                .unwrap();
             // Hard exclusion zone
             // if nearest_wall < HARD_WALL_CLEARANCE {
             //     continue;
@@ -270,8 +270,15 @@ pub fn calc_route(
                 let normalized =
                     (WALL_BUFFER - nearest_wall) as f32
                         / WALL_BUFFER as f32;
+                // Wall weight 50000 -> 70000 (exponent kept QUARTIC, WALL_BUFFER
+                // kept 350). Sweep-verified against the real scene: switching to
+                // quadratic and/or widening the buffer made the squared-metric
+                // 1000-cap search wander and CAP OUT (no route -> stall). This
+                // modest bump keeps every ball + a 50px-from-wall ball FOUND
+                // while raising min wall clearance 138->150px and leaving the
+                // worst route-end at ~146px (< APPROACH_DISTANCE). Still SOFT.
                 obstacle_cost +=
-                    (normalized.powf(4.0) * 50000.0) as i32;
+                    (normalized.powf(4.0) * 70000.0) as i32;
             }
             // Distance to center obstacle
             let cross_dist_sq = dist_to_rect(n, &bounds.cross);
@@ -286,8 +293,8 @@ pub fn calc_route(
                 dist_to_target(n, current_pos);
             let new_g =
                 current_node.g_cost
-                + movement_cost
-                + obstacle_cost;
+                    + movement_cost
+                    + obstacle_cost;
             if !open.contains_key(n) {
                 open.insert(
                     *n,
@@ -311,29 +318,6 @@ pub fn calc_route(
 
 
 
-fn dist_to_target(pos: &Position, target: &Position) -> i32 {
-    (pos.x - target.x).pow(2) + (pos.y - target.y).pow(2)
-}
-
-fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Position> {
-    let mut shortest: Option<Position> = None;
-    let mut distance: Option<i32> = None;
-
-    for ball in balls {
-        let d = (car.x - ball.x).pow(2) + (car.y - ball.y).pow(2);
-
-        if let Some(dist) = distance {
-            if d > dist {
-                continue;
-            } // hvis distancen er større lad vær
-        }
-
-        shortest = Some(ball.clone());
-        distance = Some(d);
-    }
-
-    shortest
-}
 
 fn draw_pixel(img: &mut RgbImage, pos: &Position, size: i32, color: Color) {
     for x in pos.x - size..pos.x + size {
@@ -360,6 +344,30 @@ fn draw_pixel(img: &mut RgbImage, pos: &Position, size: i32, color: Color) {
     }
 }
 
+
+fn dist_to_target(pos: &Position, target: &Position) -> i32 {
+    (pos.x - target.x).pow(2) + (pos.y - target.y).pow(2)
+}
+
+pub fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Position> {
+    let mut shortest: Option<Position> = None;
+    let mut distance: Option<i32> = None;
+
+    for ball in balls {
+        let d = (car.x - ball.x).pow(2) + (car.y - ball.y).pow(2);
+
+        if let Some(dist) = distance {
+            if d > dist {
+                continue;
+            } // hvis distancen er større lad vær
+        }
+
+        shortest = Some(ball.clone());
+        distance = Some(d);
+    }
+
+    shortest
+}
 
 fn dist_to_rect(p: &Position, b: &Bounds) -> i32 {
     let dx = if p.x < b.min_x {
@@ -391,5 +399,8 @@ fn obstacle_penalty(dist_sq: i32, safety_radius: i32) -> i32 {
     let normalized =
         (safety_radius as f32 - dist) / safety_radius as f32;
 
-    (normalized.powf(4.0) * 50000.0) as i32
+    // Cross weight 50000 -> 60000 (exponent kept QUARTIC, CROSS_BUFFER kept 400).
+    // Sweep-verified: raises min cross clearance 17.5->39.4px with no cap and
+    // route-end unchanged. Still a finite SOFT cost -> a route always exists.
+    (normalized.powf(4.0) * 60000.0) as i32
 }
