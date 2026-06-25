@@ -40,6 +40,19 @@ pub fn bounds(points: &[Position]) -> Option<Bounds> {
     })
 }
 
+/// Minkowski-inflate an AABB by `by` px on every side. Used to grow the cross
+/// by the robot's bounding radius so the body/nose/wheels clear it while the
+/// planner still treats car_center as a single point. Bounds fields are private
+/// to this module, so callers in main.rs must go through this helper.
+pub fn inflate(b: &Bounds, by: i32) -> Bounds {
+    Bounds {
+        min_x: b.min_x - by,
+        max_x: b.max_x + by,
+        min_y: b.min_y - by,
+        max_y: b.max_y + by,
+    }
+}
+
 #[derive(Serialize)]
 pub struct Obstacles {
     pub walls: Vec<Position>,

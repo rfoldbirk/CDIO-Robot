@@ -15,9 +15,20 @@ pub mod control;
 use opencv::{core, highgui, imgproc, prelude::*, types, videoio};
 
 use crate::control::{connect_ev3, connect_suck, send_command};
-use crate::path::{Node, ObstacleBounds, Obstacles, bounds, calc_route, dist_to_cross, draw_route_stream, find_nearest_ball, get_first_node, next_point, segment_clear_of_cross};
+use crate::path::{Node, ObstacleBounds, Obstacles, bounds, calc_route, dist_to_cross, draw_route_stream, find_nearest_ball, get_first_node, inflate, next_point, segment_clear_of_cross};
 
 const MAX: i32 = 100000;
+
+// --- Robot footprint (Feature A: body/nose clear the central cross) ---------
+// The planner treats the robot as a POINT at car_center, but the suction nose
+// sticks forward and the wheels stick out sideways/back. We Minkowski-inflate
+// the cross AABB by the robot's front-corner bounding radius so the BODY (not
+// just car_center) keeps clear of the cross. Increasing EITHER knob increases
+// clearance: ROBOT_CLEARANCE = sqrt(NOSE_LENGTH^2 + ROBOT_HALF_WIDTH^2). The
+// actual ROBOT_CLEARANCE is computed as a runtime `let` where the cross is
+// inflated, since stable Rust has no const f32::sqrt.
+const ROBOT_HALF_WIDTH: i32 = 45; // half the body width (wheels) in px
+const NOSE_LENGTH: i32 = 90; // car_center -> nose tip in px (>= SUCK_OFFSET=70)
 
 #[derive(Serialize)]
 struct Output {
@@ -306,6 +317,19 @@ fn main() -> opencv::Result<()> {
     // Starts at u32::MAX (saturating) so a never-seen/stale heading reads not-fresh.
     let mut frames_since_heading: u32 = u32::MAX;
 
+    // --- Feature B: back-off / re-engage persistent sub-state (Run pickup only) -
+    // After sucking ball A, the next ball B can land INSIDE the nose footprint or
+    // right beside the wheels, so the mouth can never line up (on_ball never goes
+    // true) and the robot would creep/turn forever in place. These two persistent
+    // variables drive a small closed-loop retreat: back up until there is room,
+    // then resume the normal approach. Same persistence pattern as smoothed_heading.
+    //   backing_off  = currently retreating from a too-close ball (drive backward).
+    //   stuck_frames = consecutive Run-pickup frames that were close_enough &&
+    //                  aim_clear but NOT on_ball (the beside-the-wheels case that
+    //                  just keeps turning in place without ever grabbing the ball).
+    let mut backing_off: bool = false;
+    let mut stuck_frames: u32 = 0;
+
     // EWMA weight for the new car_center vs. smoothed history. 1.0 = no smoothing
     // (instant but jittery); lower = smoother but laggier. At 0.5 the smoothed
     // point trails a real move by ~1 frame of half-amplitude. LAG TRADEOFF: do not
@@ -487,7 +511,18 @@ fn main() -> opencv::Result<()> {
             if let (Some(walls), Some(cross)) =
                 (bounds(&obstacles.walls), bounds(&obstacles.cross))
             {
-                last_obst_bounds = Some(ObstacleBounds { walls, cross });
+                // Front-corner bounding radius: grows with BOTH body width and
+                // nose length. f32 sqrt, explicit cast back to i32.
+                let robot_clearance = (((NOSE_LENGTH * NOSE_LENGTH
+                    + ROBOT_HALF_WIDTH * ROBOT_HALF_WIDTH) as f32)
+                    .sqrt()) as i32;
+                // Inflate ONLY the cross by the robot footprint. Walls stay
+                // un-inflated (wall clearance is the camera-parallax SOFT
+                // constraint in calc_route; do not touch it here).
+                last_obst_bounds = Some(ObstacleBounds {
+                    walls,
+                    cross: inflate(&cross, robot_clearance),
+                });
             }
         }
 
@@ -647,6 +682,25 @@ fn main() -> opencv::Result<()> {
             const SUCK_LATERAL_TOLERANCE: f32 = 18.0;
             const CREEP_DISTANCE: f32 = 60.0;
 
+            // --- Feature B: back-off / re-engage thresholds (LINEAR px / frames) --
+            // pythagoras() returns SQUARED px, so these LINEAR knobs are squared
+            // before every comparison. ENGAGE_MIN < RE_ENGAGE_DIST gives hysteresis
+            // so the retreat can't chatter on the threshold.
+            //   ENGAGE_MIN     = if the ball is within this many px of car_center it
+            //                    sits inside the nose/footprint and can NEVER be put
+            //                    in front of the mouth -> force a back-off.
+            //   RE_ENGAGE_DIST = back up until the ball is at least this far again,
+            //                    leaving room to re-approach. Must exceed ENGAGE_MIN.
+            //   STUCK_LIMIT    = frames of close_enough && aim_clear but not-on_ball
+            //                    before we give up creeping and back off (the
+            //                    beside-the-wheels keeps-turning case). ~3s at ~30fps.
+            const ENGAGE_MIN: i32 = 45;
+            const RE_ENGAGE_DIST: i32 = 110;
+            const STUCK_LIMIT: u32 = 90;
+            // Straight-line SQUARED car_center -> ball distance for the back-off
+            // geometry (`ball` was bound above for the cross-aware aim gate).
+            let car_to_ball_sq = pythagoras(&car_center, &ball);
+
             // SUCK gate: we must have a smoothed heading that was REFRESHED by a
             // valid frame within the last HEADING_STALE_FRAMES frames. This prevents
             // firing SUCK on a stale heading after a long marker dropout (the held
@@ -677,7 +731,56 @@ fn main() -> opencv::Result<()> {
             // ---------------------------------------------------------------------
 
             if program_state != ProgramState::Config {
-                if angle.abs() > threshold.to_radians() {
+                // --- Feature B: stuck counter + back-off latch (Run pickup only) ---
+                // CRITICAL: maintained BEFORE the angle gate. A ball beside the
+                // wheels yields a LARGE angle, so without this the code would take
+                // the TURN branch below forever and the counter (which used to live
+                // inside the pickup match) would never advance. We count only frames
+                // that are genuinely trying to pick up: Run && close_enough &&
+                // aim_clear && !on_ball. aim_clear excludes the cross-routing case
+                // (close but driving the route around the cross) so it can't false
+                // trip. Resets when not in that pickup state.
+                if program_state == ProgramState::Run {
+                    if on_ball {
+                        stuck_frames = 0;
+                    } else if close_enough && aim_clear {
+                        stuck_frames = stuck_frames.saturating_add(1);
+                    } else {
+                        // Far from the target, routing around the cross, or grabbed:
+                        // not in the close-range pickup, so the sub-state is stale.
+                        stuck_frames = 0;
+                        backing_off = false;
+                    }
+
+                    // Trigger / exit the back-off, only while actually engaging a
+                    // pickup (close_enough && aim_clear). Hysteresis: once latched we
+                    // keep retreating until car_to_ball_sq clears RE_ENGAGE_DIST
+                    // (> ENGAGE_MIN), so it can't chatter on the boundary.
+                    if close_enough && aim_clear {
+                        let too_close = car_to_ball_sq < ENGAGE_MIN * ENGAGE_MIN;
+                        let stuck = stuck_frames > STUCK_LIMIT;
+                        if !backing_off && (too_close || stuck) {
+                            backing_off = true;
+                        }
+                        if backing_off
+                            && car_to_ball_sq > RE_ENGAGE_DIST * RE_ENGAGE_DIST
+                        {
+                            // Far enough now: stop retreating, resume approach.
+                            backing_off = false;
+                            stuck_frames = 0;
+                        }
+                    }
+                }
+
+                if program_state == ProgramState::Run && backing_off {
+                    // Drive AWAY from the un-engageable ball until there is room to
+                    // re-approach. This OVERRIDES the turn/creep branches so a ball
+                    // beside the wheels stops being chased in a turn. CAVEAT: bounded
+                    // only by RE_ENGAGE_DIST and wall-unaware, so it can back toward
+                    // a wall. Run-only; End* delivery is unaffected.
+                    println!("BACK OFF");
+                    send_command(&mut ev3, "backward", &mut last_command);
+                } else if angle.abs() > threshold.to_radians() {
                     if angle > 0.0 {
                         println!("TURN RIGHT");
                         send_command(&mut ev3, "right", &mut last_command);
@@ -707,6 +810,10 @@ fn main() -> opencv::Result<()> {
                                     // KEEP the pre-emptive pump running: do NOT re-send pi "start" here.
                                     send_command(&mut pi, "stop", &mut pi_last_command);
 
+                                    // Ball captured: clear the Feature B back-off sub-state
+                                    // for the next target (target itself is cleared below).
+                                    stuck_frames = 0;
+                                    backing_off = false;
                                     target = None;
                                 } else if forward_gap > CREEP_DISTANCE {
                                     // Still far inside the close_enough bubble: drive continuous

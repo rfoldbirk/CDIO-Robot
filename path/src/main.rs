@@ -4,6 +4,13 @@ use std::{collections::HashMap, error::Error};
 
 const RADIUS: i32 = 40;
 
+// Feature A mirror (keep routing identical to the live analyzer): inflate the
+// cross AABB by the robot's front-corner bounding radius so the body/nose clear
+// the central cross. ROBOT_CLEARANCE = sqrt(NOSE_LENGTH^2 + ROBOT_HALF_WIDTH^2),
+// computed as a runtime `let` in main() (no const f32::sqrt on stable Rust).
+const ROBOT_HALF_WIDTH: i32 = 45; // half the body width (wheels) in px
+const NOSE_LENGTH: i32 = 90;      // car_center -> nose tip in px (>= SUCK_OFFSET=70)
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 struct Position {
     x: i32,
@@ -44,6 +51,18 @@ fn bounds(points: &[Position]) -> Bounds {
     }
 }
 
+// Mirror of analyzer/src/path.rs::inflate. Minkowski-inflate an AABB by `by` px
+// on every side. Separate copy because this crate's Bounds has its own private
+// fields. Keep in sync with the analyzer.
+fn inflate(b: &Bounds, by: i32) -> Bounds {
+    Bounds {
+        min_x: b.min_x - by,
+        max_x: b.max_x + by,
+        min_y: b.min_y - by,
+        max_y: b.max_y + by,
+    }
+}
+
 #[derive(Deserialize)]
 struct Obstacles {
     walls: Vec<Position>,
@@ -63,8 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let balls: Vec<Position> = serde_json::from_str(&balls_json)?;
     let obstacles: Obstacles = serde_json::from_str(&obstacles_json)?;
 
+    // Front-corner bounding radius (mirror of the analyzer). f32 sqrt, cast i32.
+    let robot_clearance = (((NOSE_LENGTH * NOSE_LENGTH
+        + ROBOT_HALF_WIDTH * ROBOT_HALF_WIDTH) as f32)
+        .sqrt()) as i32;
     let obst_bounds = ObstacleBounds {
-        cross: bounds(&obstacles.cross),
+        // Inflate ONLY the cross; walls stay un-inflated (soft wall constraint).
+        cross: inflate(&bounds(&obstacles.cross), robot_clearance),
         walls: bounds(&obstacles.walls),
     };
 
