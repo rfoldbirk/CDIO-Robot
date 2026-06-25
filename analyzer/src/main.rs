@@ -179,6 +179,10 @@ fn main() -> opencv::Result<()> {
     }
 
     let mut last_car_pos = Position::new(0, 0);
+    // EWMA-smoothed car_center in f32 pixel space (output of the recognition).
+    // None until the first real (non-(0,0)) detection so we never seed/poison the
+    // filter with the (0,0) lost-marker sentinel. Updated AFTER the jitter clamp.
+    let mut smoothed_center: Option<(f32, f32)> = None;
 
     let mut pi: Option<TcpStream> = connect_suck().ok();
     let mut ev3: Option<TcpStream> = connect_ev3().ok();
@@ -287,6 +291,41 @@ fn main() -> opencv::Result<()> {
     // in the arena, so we cache them and reuse on frames where detection drops a
     // blob, instead of panicking. Stays None until the border is seen once.
     let mut last_obst_bounds: Option<ObstacleBounds> = None;
+
+    // --- Recognition OUTPUT temporal-filtering state & tunables ----------------
+    // The robot wears a GREEN brick (center) and a YELLOW brick (front). Heading =
+    // yellow_centroid - green_centroid over a SHORT physical baseline, so a few px
+    // of centroid jitter swing the angle by many degrees. We smooth the OUTPUT
+    // (position + a UNIT heading vector) without touching color detection.
+
+    // Persistent SMOOTHED UNIT heading vector (always re-normalized to length 1).
+    // None until the first VALID heading frame, so frame 1 never yields a (0,0)
+    // heading or a divide-by-zero. HELD across invalid frames (short/merged baseline).
+    let mut smoothed_heading: Option<(f32, f32)> = None;
+    // Frames since the smoothed heading was last refreshed by a VALID frame.
+    // Starts at u32::MAX (saturating) so a never-seen/stale heading reads not-fresh.
+    let mut frames_since_heading: u32 = u32::MAX;
+
+    // EWMA weight for the new car_center vs. smoothed history. 1.0 = no smoothing
+    // (instant but jittery); lower = smoother but laggier. At 0.5 the smoothed
+    // point trails a real move by ~1 frame of half-amplitude. LAG TRADEOFF: do not
+    // drop below ~0.3 or close-range aim visibly lags the robot. The jitter clamp
+    // runs FIRST on the raw value, so this only refines an already-accepted point.
+    const CENTER_ALPHA: f32 = 0.5;
+    // Minimum green->yellow centroid separation (px) for the heading angle to be
+    // trustworthy this frame. Below this the bricks are effectively merged and a
+    // few px of jitter swing the angle wildly, so the frame is INVALID and the
+    // smoothed heading HOLDS. Calibrate to slightly below real on-screen spacing.
+    const MIN_BASELINE: f32 = 12.0;
+    // EWMA weight for the new unit heading vs. the smoothed unit heading. Lower
+    // than CENTER_ALPHA on purpose: heading is the noisiest signal (short baseline)
+    // so it gets heavier averaging. Higher = snappier turns but more angle jitter.
+    const HEAD_ALPHA: f32 = 0.35;
+    // Max frames since the last VALID heading refresh for the smoothed heading to
+    // still gate SUCK. After a marker dropout longer than this, head_valid goes
+    // false so SUCK cannot fire on a stale heading. ~0.2-0.3s worth of frames.
+    const HEADING_STALE_FRAMES: u32 = 5;
+    // ---------------------------------------------------------------------------
 
 
     loop {
@@ -419,6 +458,24 @@ fn main() -> opencv::Result<()> {
             last_car_pos = car_center;
         }
 
+        // EWMA-smooth the accepted car_center to kill small jitter. Runs AFTER the
+        // jitter clamp, so it only refines an already-accepted point (clamp then
+        // smooth, sequential). Guard on (0,0) so a lost-center frame cannot seed or
+        // poison the filter; car_center stays a Position for all downstream math.
+        if car_center.x != 0 || car_center.y != 0 {
+            match smoothed_center {
+                None => smoothed_center = Some((car_center.x as f32, car_center.y as f32)),
+                Some((sx, sy)) => {
+                    let nx = sx + CENTER_ALPHA * (car_center.x as f32 - sx);
+                    let ny = sy + CENTER_ALPHA * (car_center.y as f32 - sy);
+                    smoothed_center = Some((nx, ny));
+                }
+            }
+            if let Some((sx, sy)) = smoothed_center {
+                car_center = Position::new(sx.round() as i32, sy.round() as i32);
+            }
+        }
+
         let head = state.get_car_direction();
         let balls = state.get_balls();
         // Obstacle bounds (walls + cross AABBs). Walls and the cross are STATIC,
@@ -466,9 +523,30 @@ fn main() -> opencv::Result<()> {
                 send_command(&mut pi, "start", &mut pi_last_command);
             }
 
-            // Current heading vector
-            let fx = (head.x - car_center.x) as f32;
-            let fy = (head.y - car_center.y) as f32;
+            // Current RAW heading vector (green->yellow) and its baseline length.
+            let raw_fx = (head.x - car_center.x) as f32;
+            let raw_fy = (head.y - car_center.y) as f32;
+            let baseline = (raw_fx * raw_fx + raw_fy * raw_fy).sqrt();
+            // Valid only if the front marker is present AND the baseline is long
+            // enough to trust the angle (short/merged baseline => untrustworthy).
+            let heading_valid_now = (head.x != 0 || head.y != 0) && baseline >= MIN_BASELINE;
+            if heading_valid_now {
+                // baseline >= MIN_BASELINE > 0, so this division is safe.
+                let (ux, uy) = (raw_fx / baseline, raw_fy / baseline);
+                match smoothed_heading {
+                    None => smoothed_heading = Some((ux, uy)),
+                    Some((hx, hy)) => {
+                        let bx = hx + HEAD_ALPHA * (ux - hx);
+                        let by = hy + HEAD_ALPHA * (uy - hy);
+                        // Re-normalize to keep it a unit vector after blending.
+                        smoothed_heading = Some(normalize(bx, by));
+                    }
+                }
+                frames_since_heading = 0;
+            } else {
+                // Invalid frame: HOLD the previous smoothed heading, age the counter.
+                frames_since_heading = frames_since_heading.saturating_add(1);
+            }
 
             // Sørger for at vi peger mod bolden, når vi kommer tæt nok på
             let target_pos = match close_enough {
@@ -484,7 +562,10 @@ fn main() -> opencv::Result<()> {
             let gx = (target_pos.x - car_center.x) as f32;
             let gy = (target_pos.y - car_center.y) as f32;
 
-            let (fx, fy) = normalize(fx, fy);
+            // Use the STABLE smoothed unit heading for all downstream math (angle,
+            // mouth, on_ball). If no valid heading has ever been seen it is (0.0,0.0)
+            // -- identical to what normalize() returned for a zero vector before.
+            let (fx, fy) = smoothed_heading.unwrap_or((0.0, 0.0));
             let (mut gx, mut gy) = normalize(gx, gy);
 
             if program_state == ProgramState::EndGoToPos {
@@ -517,10 +598,12 @@ fn main() -> opencv::Result<()> {
             const SUCK_LATERAL_TOLERANCE: f32 = 40.0;
             const CREEP_DISTANCE: f32 = 60.0;
 
-            // get_car_direction() returns Position{0,0} when the CarDirection marker is
-            // missing; with no valid heading the mouth projection is garbage, so we must
-            // never fire SUCK on a lost heading.
-            let head_valid = head.x != 0 || head.y != 0;
+            // SUCK gate: we must have a smoothed heading that was REFRESHED by a
+            // valid frame within the last HEADING_STALE_FRAMES frames. This prevents
+            // firing SUCK on a stale heading after a long marker dropout (the held
+            // smoothed_heading is still Some, but frames_since_heading has aged out).
+            let head_valid =
+                smoothed_heading.is_some() && frames_since_heading <= HEADING_STALE_FRAMES;
 
             // Project the mouth from car_center along the (already-normalized) heading.
             let mouth = Position::new(
