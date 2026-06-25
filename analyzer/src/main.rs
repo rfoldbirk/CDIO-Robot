@@ -14,7 +14,7 @@ pub mod control;
 
 use opencv::{core, highgui, imgproc, prelude::*, types, videoio};
 
-use crate::control::{connect, send_command};
+use crate::control::{connect_ev3, connect_suck, send_command};
 use crate::path::{Node, ObstacleBounds, Obstacles, bounds, calc_route, draw_route_stream, find_nearest_ball, get_first_node, next_point};
 
 const MAX: i32 = 100000;
@@ -178,24 +178,29 @@ fn main() -> opencv::Result<()> {
         end_pos = serde_json::from_str(&file).unwrap_or(end_pos);
     }
 
+    let mut last_car_pos = Position::new(0, 0);
 
-
-    let mut ev3: Option<TcpStream> = connect().ok();
+    let mut pi: Option<TcpStream> = connect_suck().ok();
+    let mut ev3: Option<TcpStream> = connect_ev3().ok();
+    let mut pi_last_command = String::new();
     let mut last_command = String::new();
+
+
+    send_command(&mut pi, "arm", &mut pi_last_command);
 
     // load farve værdier fra kommandolinjen
     // precision values (unøjagtigheder)
-    let red_hex: String = env::args().nth(1).unwrap_or("#D82938".to_string());
+    let red_hex: String = env::args().nth(1).unwrap_or("#9D2B5C".to_string());
     let rp: u8 = env::args()
         .nth(2)
-        .unwrap_or("61".to_string())
+        .unwrap_or("41".to_string())
         .parse()
         .expect("Naah");
 
-    let white_hex: String = env::args().nth(3).unwrap_or("#FFFFFF".to_string());
+    let white_hex: String = env::args().nth(3).unwrap_or("#FFF8FF".to_string());
     let wp: u8 = env::args()
         .nth(4)
-        .unwrap_or("40".to_string())
+        .unwrap_or("22".to_string())
         .parse()
         .expect("Naah");
 
@@ -206,14 +211,14 @@ fn main() -> opencv::Result<()> {
         .parse()
         .expect("Naah");
 
-    let car_center: String = env::args().nth(7).unwrap_or("#32815F".to_string());
+    let car_center: String = env::args().nth(7).unwrap_or("#198367".to_string());
     let car_center_precision: u8 = env::args()
         .nth(8)
         .unwrap_or("31".to_string())
         .parse()
         .expect("Naah");
 
-    let car_direction: String = env::args().nth(9).unwrap_or("#DCBB33".to_string());
+    let car_direction: String = env::args().nth(9).unwrap_or("#D8C456".to_string());
     let car_direction_precision: u8 = env::args()
         .nth(10)
         .unwrap_or("31".to_string())
@@ -276,9 +281,6 @@ fn main() -> opencv::Result<()> {
     };
 
     let mut target = None;
-    let mut deb = true;
-
-
 
 
 
@@ -303,12 +305,15 @@ fn main() -> opencv::Result<()> {
         // a = 97
         // d = 100
         // s = 115
+        //
+
 
         match key {
             119 => end_pos.y -= 5,
             97 => end_pos.x -= 5,
             100 => end_pos.x += 5,
             115 => end_pos.y += 5,
+            112 => send_command(&mut pi, "arm", &mut pi_last_command),
             49 => {
                 // find approximate center
                 end_pos.x = frame.cols() as i32 / 2;
@@ -328,29 +333,27 @@ fn main() -> opencv::Result<()> {
             _ => {}
         }
 
+
         // draw end_position :)
         let color = Color::Debug.rgb();
         draw(&mut frame, end_pos, (color[0] as f64, color[1] as f64, color[2] as f64))?;
 
+
+
         match program_state {
-            ProgramState::Config => {
-                if let Ok(true) = show_frame(&frame) {
-                    break;
-                }
-                continue;
-            },
             ProgramState::EndGoToPos => {
                 target = Some(end_pos);
             },
             ProgramState::EndOpen => {
                 // TODO: Send open signal
-                // Turn sucking up
-                // SUCK()
+                // START SUCKING
+                send_command(&mut pi, "start", &mut pi_last_command);
                 std::thread::sleep(Duration::from_secs(5));
                 send_command(&mut ev3, "pick", &mut last_command);
                 std::thread::sleep(Duration::from_secs(1));
                 send_command(&mut ev3, "stop", &mut last_command);
                 // STOP_SUCK();
+                send_command(&mut pi, "stop", &mut pi_last_command);
                 std::thread::sleep(Duration::from_secs(5));
 
                 program_state = ProgramState::EndShakeItOut;
@@ -381,6 +384,7 @@ fn main() -> opencv::Result<()> {
             core::AlgorithmHint::ALGO_HINT_ACCURATE,
         )?;
 
+
         let bytes = rgb.data_bytes().unwrap();
         let img = RgbImage::from_raw(rgb.cols() as u32, rgb.rows() as u32, bytes.to_vec()).unwrap();
 
@@ -390,6 +394,7 @@ fn main() -> opencv::Result<()> {
         state.marks.clear();
         state.groupings.clear();
 
+
         state
             .scan_for_marks() // finder alle pixels der har samme farve som de valgte farver - eller i det mindste er tæt nok på
             .group_marks() // grupperer pixels som ligger op ad hinanden
@@ -397,9 +402,20 @@ fn main() -> opencv::Result<()> {
             .find_borders();
 
 
-
         // Get car from picture!
-        let car_center = state.get_car_center();
+        let mut car_center = state.get_car_center();
+
+        if last_car_pos.x == 0 {
+            last_car_pos = car_center;
+        }
+        else {
+            // check if car has moved too much, if so, then reverse it
+            if car_center.x - last_car_pos.x > 10 || car_center.y - last_car_pos.y > 10 {
+                car_center = last_car_pos;
+            }
+            last_car_pos = car_center;
+        }
+
         let head = state.get_car_direction();
         let balls = state.get_balls();
         let obstacles = state.get_obstacles();
@@ -407,6 +423,7 @@ fn main() -> opencv::Result<()> {
             cross: bounds(&obstacles.cross),
             walls: bounds(&obstacles.walls),
         };
+
 
 
         if target.is_none() {
@@ -420,7 +437,9 @@ fn main() -> opencv::Result<()> {
             let route = calc_route(&car_center, &target.unwrap(), &obst_bounds);
             draw_route_stream(&mut frame, &route.1)?;
 
+
             let next = next_point(&car_center, &route.1);
+
 
             let dist_threshold = 1;
             // Når vi til sidst bare skal vende bagenden til, så sørger vi for den tror den er tæt nok på,
@@ -437,12 +456,9 @@ fn main() -> opencv::Result<()> {
                 false => next.pos,
             };
 
-            draw(&mut frame, target_pos, (200.0, 5.0, 255.0))?;
-            if deb && close_enough {
-                deb = false;
-                send_command(&mut ev3, "stop", &mut last_command);
-                std::thread::sleep(Duration::from_secs(5));
-            }
+
+            draw(&mut frame, target_pos, (200.0, 50.0, 255.0))?;
+
 
             // Desired direction
             let gx = (target_pos.x - car_center.x) as f32;
@@ -455,41 +471,43 @@ fn main() -> opencv::Result<()> {
 
             let threshold = 7.0_f32; // originally 15.0
 
-            if angle.abs() > threshold.to_radians() {
-                if angle > 0.0 {
-                    println!("TURN RIGHT");
-                    send_command(&mut ev3, "right", &mut last_command);
-                } else {
-                    println!("TURN LEFT");
-                    send_command(&mut ev3, "left", &mut last_command);
-                }
-            } else {
-                if close_enough {
-                    match program_state {
-                        ProgramState::Run => {
-                            println!("SUCK!");
 
-                            // SUCK();
-
-                            send_command(&mut ev3, "stop", &mut last_command);
-                            std::thread::sleep(Duration::from_secs(3));
-
-                            send_command(&mut ev3, "backward", &mut last_command);
-                            std::thread::sleep(Duration::from_secs_f32(1.0));
-                            send_command(&mut ev3, "stop", &mut last_command);
-
-                            target = None;
-                        }
-                        ProgramState::EndGoToPos =>
-                            program_state = ProgramState::EndTurnAround,
-                        ProgramState::EndTurnAround =>
-                            program_state = ProgramState::EndOpen,
-                        _ => {}
+            if program_state != ProgramState::Config {
+                if angle.abs() > threshold.to_radians() {
+                    if angle > 0.0 {
+                        println!("TURN RIGHT");
+                        send_command(&mut ev3, "right", &mut last_command);
+                    } else {
+                        println!("TURN LEFT");
+                        send_command(&mut ev3, "left", &mut last_command);
                     }
-                }
-                else {
-                    println!("FORWARD");
-                    send_command(&mut ev3, "forward", &mut last_command);
+                } else {
+                    if close_enough {
+                        match program_state {
+                            ProgramState::Run => {
+                                println!("SUCK!");
+
+                                send_command(&mut pi, "start", &mut pi_last_command);
+                                send_command(&mut ev3, "stop", &mut last_command);
+                                std::thread::sleep(Duration::from_secs(3));
+
+                                send_command(&mut ev3, "backward", &mut last_command);
+                                std::thread::sleep(Duration::from_secs_f32(1.0));
+                                send_command(&mut ev3, "stop", &mut last_command);
+
+                                target = None;
+                            }
+                            ProgramState::EndGoToPos =>
+                                program_state = ProgramState::EndTurnAround,
+                            ProgramState::EndTurnAround =>
+                                program_state = ProgramState::EndOpen,
+                            _ => {}
+                        }
+                    }
+                    else {
+                        println!("FORWARD");
+                        send_command(&mut ev3, "forward", &mut last_command);
+                    }
                 }
             }
         }
@@ -674,17 +692,8 @@ impl State {
 
     /// Går igennem alle grupper og fjerner dem med for små volumener
     fn filter_groups(&mut self) -> &mut Self {
-        self.groupings.retain(|g| g.volume() > 320);
-        self.groupings.retain(|g| g.color == Color::White && g.volume() < 500 || g.color != Color::White);
-
-        for group in &self.groupings.clone() {
-            if group.color == Color::Red && group.volume() < 15000 {
-                continue;
-            }
-
-            // self.draw_group(group);
-            // println!("{:#?} Group has volume: {}", group.color, group.volume());
-        }
+        self.groupings.retain(|g| g.volume() > 220);
+        // self.groupings.retain(|g| g.color == Color::White && g.volume() < 1000 || g.color != Color::White);
 
         self
     }
