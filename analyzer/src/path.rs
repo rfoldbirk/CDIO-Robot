@@ -326,6 +326,63 @@ pub fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Positi
     shortest
 }
 
+/// SQUARED distance from a point to the cross AABB (0 if the point is inside).
+/// Thin public wrapper over `dist_to_rect` so callers in other modules (where
+/// the `Bounds` fields are private) can measure proximity to the central cross.
+/// Compare against a LINEAR threshold by squaring it, e.g. `dist < NEAR*NEAR`.
+pub fn dist_to_cross(p: &Position, cross: &Bounds) -> i32 {
+    dist_to_rect(p, cross)
+}
+
+/// True iff the straight segment a->b stays clear of the cross AABB by more
+/// than `margin` px at every sampled point. We sample ~every 15px (capped at
+/// MAX_SAMPLES so a long segment can't blow up the sample count) and compare
+/// the SQUARED distance to `margin*margin` to avoid a sqrt per sample.
+/// Zero-length segments (a == b) are handled without a div-by-zero: we just
+/// test the single endpoint.
+pub fn segment_clear_of_cross(
+    a: &Position,
+    b: &Position,
+    cross: &Bounds,
+    margin: i32,
+) -> bool {
+    let margin_sq = margin * margin;
+
+    let dx = (b.x - a.x) as f32;
+    let dy = (b.y - a.y) as f32;
+    let len = (dx * dx + dy * dy).sqrt();
+
+    // a == b (or sub-pixel apart): test just the endpoint, no division.
+    if len < 1.0 {
+        return dist_to_rect(a, cross) > margin_sq;
+    }
+
+    const SAMPLE_SPACING: f32 = 15.0;
+    const MAX_SAMPLES: i32 = 20;
+    // Number of intervals: at least 1, ~every 15px, capped at MAX_SAMPLES.
+    let mut steps = (len / SAMPLE_SPACING).ceil() as i32;
+    if steps < 1 {
+        steps = 1;
+    }
+    if steps > MAX_SAMPLES {
+        steps = MAX_SAMPLES;
+    }
+
+    // Inclusive of both endpoints: i = 0..=steps.
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let sample = Position {
+            x: (a.x as f32 + dx * t).round() as i32,
+            y: (a.y as f32 + dy * t).round() as i32,
+        };
+        if dist_to_rect(&sample, cross) <= margin_sq {
+            return false;
+        }
+    }
+
+    true
+}
+
 fn dist_to_rect(p: &Position, b: &Bounds) -> i32 {
     let dx = if p.x < b.min_x {
         b.min_x - p.x

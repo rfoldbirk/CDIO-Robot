@@ -15,7 +15,7 @@ pub mod control;
 use opencv::{core, highgui, imgproc, prelude::*, types, videoio};
 
 use crate::control::{connect_ev3, connect_suck, send_command};
-use crate::path::{Node, ObstacleBounds, Obstacles, bounds, calc_route, draw_route_stream, find_nearest_ball, get_first_node, next_point};
+use crate::path::{Node, ObstacleBounds, Obstacles, bounds, calc_route, dist_to_cross, draw_route_stream, find_nearest_ball, get_first_node, next_point, segment_clear_of_cross};
 
 const MAX: i32 = 100000;
 
@@ -548,10 +548,45 @@ fn main() -> opencv::Result<()> {
                 frames_since_heading = frames_since_heading.saturating_add(1);
             }
 
-            // Sørger for at vi peger mod bolden, når vi kommer tæt nok på
-            let target_pos = match close_enough {
-                true => target.unwrap(),
-                false => next.pos,
+            // --- Cross-aware close-range straight-aim gate -----------------------
+            // The A* route in calc_route already steers AROUND the central cross,
+            // but the close-range bypass below aims STRAIGHT at the ball once we are
+            // `close_enough`, which can cut the cross in half. We only allow that
+            // straight aim when the car->ball segment is genuinely clear of the
+            // cross, OR when the ball itself sits right next to the cross (then
+            // driving at it is intended/unavoidable and must stay pickable).
+            //
+            //   NEAR_CROSS   = linear px radius around the cross AABB within which a
+            //                  ball is treated as "near the cross" and approached
+            //                  directly. Generous on purpose so a ball just outside
+            //                  the cross stays pickable (NEVER repelled).
+            //   CROSS_MARGIN = linear px clearance the straight car->ball segment must
+            //                  keep from the cross AABB to count as a clear shot.
+            // dist_to_cross / segment_clear_of_cross work in SQUARED px; the helpers
+            // square these linear thresholds internally.
+            const NEAR_CROSS: i32 = 120;
+            const CROSS_MARGIN: i32 = 60;
+
+            let ball = target.unwrap();
+            let ball_near_cross =
+                dist_to_cross(&ball, &obst_bounds.cross) < NEAR_CROSS * NEAR_CROSS;
+            let path_clear =
+                segment_clear_of_cross(&car_center, &ball, &obst_bounds.cross, CROSS_MARGIN);
+            // Straight aim is allowed if the shot is clear OR the ball hugs the cross.
+            let aim_clear = ball_near_cross || path_clear;
+
+            // Sørger for at vi peger mod bolden, når vi kommer tæt nok på.
+            // In Run we only aim straight at the ball when the path is cross-clear
+            // (aim_clear); otherwise we keep following the cross-avoiding route
+            // (next.pos) to go AROUND the cross. End* states keep the ORIGINAL
+            // behaviour (straight at target once close_enough, unaffected by the
+            // cross), so a near-cross delivery point is never refused.
+            let target_pos = if close_enough
+                && (program_state != ProgramState::Run || aim_clear)
+            {
+                target.unwrap()
+            } else {
+                next.pos
             };
 
 
@@ -575,7 +610,17 @@ fn main() -> opencv::Result<()> {
 
             let angle = angle_between(fx, fy, gx, gy);
 
-            let threshold = 7.0_f32; // originally 15.0
+            // Heading deadband (deg). In the close/pickup phase we tighten it so
+            // the robot keeps fine-aiming until the ball is nearly dead-ahead
+            // before it creeps/sucks -- a flat 7deg at ~100px leaves the ball
+            // ~12px off to the side, so the head ends up BESIDE the ball. The
+            // heading is EWMA-smoothed (smoothed_heading), so this tight value
+            // does NOT hunt/oscillate.
+            //   FINE_THRESHOLD = close-range aim deadband (deg) used once
+            //                    `close_enough`. Lower = the mouth lines up more
+            //                    precisely on the ball before creeping.
+            const FINE_THRESHOLD: f32 = 4.0;
+            let threshold = if close_enough { FINE_THRESHOLD } else { 7.0_f32 }; // far-approach kept at 7.0 (originally 15.0)
 
             // --- Run-state suction-mouth precision model (LINEAR pixels) ----------
             // These quantities are dot/cross products of pixel vectors and are
@@ -595,7 +640,11 @@ fn main() -> opencv::Result<()> {
             //                           and start pulsing forward<->stop.
             const SUCK_OFFSET: f32 = 70.0;
             const SUCK_TOLERANCE: f32 = 35.0;
-            const SUCK_LATERAL_TOLERANCE: f32 = 40.0;
+            // Tightened 40.0 -> 18.0: at 40px SUCK could fire while the ball was
+            // clearly BESIDE the mouth (head off to the side), so the suction
+            // missed. 18px only fires when the ball is genuinely in front of the
+            // mouth. Pairs with FINE_THRESHOLD, which lines the head up first.
+            const SUCK_LATERAL_TOLERANCE: f32 = 18.0;
             const CREEP_DISTANCE: f32 = 60.0;
 
             // SUCK gate: we must have a smoothed heading that was REFRESHED by a
@@ -614,7 +663,7 @@ fn main() -> opencv::Result<()> {
             draw(&mut frame, mouth, (0.0, 0.0, 255.0))?;
 
             // Ball relative to the mouth, decomposed onto the heading frame.
-            let ball = target.unwrap();
+            // (`ball` was bound above for the cross-aware aim gate.)
             let bx = (ball.x - mouth.x) as f32;
             let by = (ball.y - mouth.y) as f32;
             // Signed gap ALONG heading: >0 = ball still ahead of the mouth, <=0 = at/past it.
@@ -637,7 +686,13 @@ fn main() -> opencv::Result<()> {
                         send_command(&mut ev3, "left", &mut last_command);
                     }
                 } else {
-                    if close_enough {
+                    // Enter the pickup / End-transition match only when close AND
+                    // (not Run, OR the straight shot to the ball is cross-clear).
+                    // When `Run && close_enough && !aim_clear` the cross is between
+                    // the car and a ball that is NOT near the cross, so we fall to
+                    // the else branch and DRIVE forward toward next.pos (the route
+                    // around the cross) instead of creeping/sucking through it.
+                    if close_enough && (program_state != ProgramState::Run || aim_clear) {
                         match program_state {
                             ProgramState::Run => {
                                 if on_ball {
