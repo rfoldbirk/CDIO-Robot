@@ -340,11 +340,20 @@ fn main() -> opencv::Result<()> {
     // trustworthy this frame. Below this the bricks are effectively merged and a
     // few px of jitter swing the angle wildly, so the frame is INVALID and the
     // smoothed heading HOLDS. Calibrate to slightly below real on-screen spacing.
-    const MIN_BASELINE: f32 = 12.0;
-    // EWMA weight for the new unit heading vs. the smoothed unit heading. Lower
-    // than CENTER_ALPHA on purpose: heading is the noisiest signal (short baseline)
-    // so it gets heavier averaging. Higher = snappier turns but more angle jitter.
-    const HEAD_ALPHA: f32 = 0.35;
+    // 12.0 -> 6.0: 12 rejected too many short-baseline frames, leaving the heading
+    // stale/laggy; 6 accepts more frames for a FRESHER heading. MUST stay BELOW the
+    // real on-screen green->yellow brick spacing or the heading never refreshes;
+    // still rejects degenerate/merged baselines (<6px) so the heading-unit divide
+    // stays safe (MIN_BASELINE > 0).
+    const MIN_BASELINE: f32 = 6.0;
+    // EWMA weight for the new unit heading vs. the smoothed unit heading. Higher =
+    // snappier turns, less lag, but a touch more angle jitter; lower = smoother but
+    // laggier. 0.35 -> 0.6: at 0.35 a snap turn took ~8 frames to settle within the
+    // FINE_THRESHOLD deadband, and that lag made the close-range aim gate HUNT; 0.6
+    // halves the settle time (~4 frames) so the gate stops hunting. 0.6 still keeps
+    // ~40% smoothing (far from raw 1.0), so it does NOT reintroduce the un-smoothed
+    // jitter the EWMA was added to kill -- this LIGHTENS the smoothing, not removes it.
+    const HEAD_ALPHA: f32 = 0.6;
     // Max frames since the last VALID heading refresh for the smoothed heading to
     // still gate SUCK. After a marker dropout longer than this, head_valid goes
     // false so SUCK cannot fire on a stale heading. ~0.2-0.3s worth of frames.
@@ -653,7 +662,11 @@ fn main() -> opencv::Result<()> {
             // does NOT hunt/oscillate.
             //   FINE_THRESHOLD = close-range aim deadband (deg) used once
             //                    `close_enough`. Lower = the mouth lines up more
-            //                    precisely on the ball before creeping.
+            //                    precisely on the ball before creeping. Kept at 4.0:
+            //                    with HEAD_ALPHA raised to 0.6 the smoothed heading no
+            //                    longer lags enough to hunt at 4deg. If any residual
+            //                    hunting remains, raise to ~5-6 (do NOT re-lower
+            //                    HEAD_ALPHA, which would bring back the lag).
             const FINE_THRESHOLD: f32 = 4.0;
             let threshold = if close_enough { FINE_THRESHOLD } else { 7.0_f32 }; // far-approach kept at 7.0 (originally 15.0)
 
@@ -680,6 +693,15 @@ fn main() -> opencv::Result<()> {
             // missed. 18px only fires when the ball is genuinely in front of the
             // mouth. Pairs with FINE_THRESHOLD, which lines the head up first.
             const SUCK_LATERAL_TOLERANCE: f32 = 18.0;
+            // How far (px) the ball may sit BEHIND the mouth along heading and still
+            // be grabbable. forward_gap < this means the nose has OVERSHOT the ball
+            // (ball is between the car and the mouth, or further back) where the
+            // suction can't reach it, so we must back off and re-approach instead of
+            // sucking the same uncatchable ball in a loop. SIGNED, negative.
+            // More negative -> grabs balls closer under the nose; toward 0 -> backs
+            // off sooner. Must stay BELOW the SUCK window so a normal front approach
+            // (forward_gap creeping down through positive into [0,35]) is unaffected.
+            const BEHIND_LIMIT: f32 = -15.0;
             const CREEP_DISTANCE: f32 = 60.0;
 
             // --- Feature B: back-off / re-engage thresholds (LINEAR px / frames) --
@@ -726,8 +748,15 @@ fn main() -> opencv::Result<()> {
             let lateral = (bx * fy - by * fx).abs();
 
             // Mouth is on/past the ball within tolerances AND heading is trustworthy.
-            let on_ball =
-                head_valid && forward_gap <= SUCK_TOLERANCE && lateral <= SUCK_LATERAL_TOLERANCE;
+            // forward_gap >= BEHIND_LIMIT is the LOWER bound: a ball that has slipped
+            // BEHIND the mouth (nose overshot) is no longer grabbable and must NOT
+            // fire SUCK (it would loop on an uncatchable ball). A normal approach
+            // creeps DOWN through positive forward_gap and fires SUCK at ~0..35, well
+            // above BEHIND_LIMIT, so this bound never blocks a legitimate grab.
+            let on_ball = head_valid
+                && forward_gap >= BEHIND_LIMIT
+                && forward_gap <= SUCK_TOLERANCE
+                && lateral <= SUCK_LATERAL_TOLERANCE;
             // ---------------------------------------------------------------------
 
             if program_state != ProgramState::Config {
@@ -757,7 +786,15 @@ fn main() -> opencv::Result<()> {
                     // keep retreating until car_to_ball_sq clears RE_ENGAGE_DIST
                     // (> ENGAGE_MIN), so it can't chatter on the boundary.
                     if close_enough && aim_clear {
-                        let too_close = car_to_ball_sq < ENGAGE_MIN * ENGAGE_MIN;
+                        // DISTANCE-only missed the behind-the-nose case: a ball ~50-65px
+                        // BEHIND the mouth has car_to_ball_sq > ENGAGE_MIN^2 yet on_ball
+                        // would have fired uncatchably. forward_gap (signed, computed at
+                        // the mouth) catches it; head_valid guards against a stale heading
+                        // making forward_gap meaningless. Backing up then raises BOTH
+                        // car_to_ball_sq (-> the RE_ENGAGE_DIST exit) and forward_gap
+                        // (mouth retreats, ball ends up in FRONT) for a clean re-approach.
+                        let too_close = car_to_ball_sq < ENGAGE_MIN * ENGAGE_MIN
+                            || (head_valid && forward_gap < BEHIND_LIMIT);
                         let stuck = stuck_frames > STUCK_LIMIT;
                         if !backing_off && (too_close || stuck) {
                             backing_off = true;
