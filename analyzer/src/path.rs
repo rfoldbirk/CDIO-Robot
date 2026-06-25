@@ -347,5 +347,5 @@ fn obstacle_penalty(dist_sq: i32, safety_radius: i32) -> i32 {
     let normalized =
         (safety_radius as f32 - dist) / safety_radius as f32;
 
-    (normalized.powf(4.0) * 50000.0) as i32
+    (normalized.powf(7.8) * 500000.0) as i32
 }
