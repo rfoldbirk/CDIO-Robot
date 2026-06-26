@@ -194,6 +194,7 @@ fn main() -> opencv::Result<()> {
 
 
     send_command(&mut pi, "arm", &mut pi_last_command);
+    send_command(&mut ev3, "close", &mut pi_last_command);
 
     // load farve værdier fra kommandolinjen
     // precision values (unøjagtigheder)
@@ -207,7 +208,7 @@ fn main() -> opencv::Result<()> {
     let white_hex: String = env::args().nth(3).unwrap_or("#FFF8FF".to_string());
     let wp: u8 = env::args()
         .nth(4)
-        .unwrap_or("22".to_string())
+        .unwrap_or("42".to_string())
         .parse()
         .expect("Naah");
 
@@ -218,17 +219,17 @@ fn main() -> opencv::Result<()> {
         .parse()
         .expect("Naah");
 
-    let car_center: String = env::args().nth(7).unwrap_or("#198367".to_string());
+    let car_center: String = env::args().nth(7).unwrap_or("#1C937A".to_string());
     let car_center_precision: u8 = env::args()
         .nth(8)
-        .unwrap_or("31".to_string())
+        .unwrap_or("41".to_string())
         .parse()
         .expect("Naah");
 
-    let car_direction: String = env::args().nth(9).unwrap_or("#D8C456".to_string());
+    let car_direction: String = env::args().nth(9).unwrap_or("#DECA5B".to_string());
     let car_direction_precision: u8 = env::args()
         .nth(10)
-        .unwrap_or("31".to_string())
+        .unwrap_or("41".to_string())
         .parse()
         .expect("Naah");
 
@@ -331,8 +332,6 @@ fn main() -> opencv::Result<()> {
         // a = 97
         // d = 100
         // s = 115
-        //
-
 
         match key {
             119 => end_pos.y -= 5,
@@ -504,8 +503,6 @@ fn main() -> opencv::Result<()> {
             }
         }
 
-
-
         if target.is_none() {
             target = find_nearest_ball(&car_center, &balls);
 
@@ -517,9 +514,10 @@ fn main() -> opencv::Result<()> {
             let route = calc_route(&car_center, &target.unwrap(), obst_bounds);
             draw_route_stream(&mut frame, &route.1)?;
 
+            draw(&mut frame, target.unwrap(), (200.0, 50.0, 255.0))?;
+
 
             let next = next_point(&car_center, &route.1);
-
 
             // ---- Final-approach / suction-mouth tunables (CALIBRATE) ----
             // SUCK_OFFSET: px from car_center forward to the physical mouth,
@@ -748,16 +746,26 @@ fn main() -> opencv::Result<()> {
                                     }
                                 }
                             }
-                            ProgramState::EndGoToPos =>
-                                program_state = ProgramState::EndTurnAround,
-                            ProgramState::EndTurnAround =>
-                                program_state = ProgramState::EndOpen,
+                            ProgramState::EndGoToPos => {
+                                send_command(&mut ev3, "stop", &mut pi_last_command);
+                                program_state = ProgramState::EndOpen;
+                            }
+                            ProgramState::EndTurnAround => {
+                                program_state = ProgramState::EndOpen;
+                                send_command(&mut ev3, "stop", &mut pi_last_command);
+                            }
                             _ => {}
                         }
                     }
                     else {
-                        println!("FORWARD");
-                        send_command(&mut ev3, "forward", &mut last_command);
+                        if program_state == ProgramState::EndGoToPos{
+                            println!("BACKWARD");
+                            send_command(&mut ev3, "backward", &mut last_command);
+                        }
+                        else {
+                            println!("FORWARD");
+                            send_command(&mut ev3, "forward", &mut last_command);
+                        }
                     }
                 }
             }
@@ -798,6 +806,13 @@ fn main() -> opencv::Result<()> {
     Ok(())
 }
 
+
+
+fn pythagoras(point1: &Position, point2: &Position) -> i32 {
+    let dx = point2.x - point1.x;
+    let dy = point2.y - point1.y;
+    dx * dx + dy * dy
+}
 
 fn show_frame(frame: &Mat) -> opencv::Result<bool> {
     highgui::imshow("camera", frame)?;
@@ -960,7 +975,18 @@ impl State {
 
     /// Går igennem alle grupper og fjerner dem med for små volumener
     fn filter_groups(&mut self) -> &mut Self {
-        self.groupings.retain(|g| g.volume() > 220);
+        self.groupings.retain(|g| {
+            // let width = g.marks.keys().map(|p| p.x).max().unwrap_or(0) - g.marks.keys().map(|p| p.x).min().unwrap_or(0);
+            let height = g.marks.keys().map(|p| p.y).max().unwrap_or(0) - g.marks.keys().map(|p| p.y).min().unwrap_or(0);
+
+            if g.color == Color::White {
+                g.volume() > 220 && height < 30
+            }
+            else {
+                g.volume() > 220
+            }
+
+        });
         // self.groupings.retain(|g| g.color == Color::White && g.volume() < 1000 || g.color != Color::White);
 
         self
