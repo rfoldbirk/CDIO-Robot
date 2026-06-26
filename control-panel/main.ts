@@ -3,6 +3,8 @@ import { ChildProcess, spawn } from "child_process";
 const app = express();
 const port = 3000;
 
+let loops: NodeJS.Timeout[] = [];
+
 app.get("/", (req, res) => {
     res.sendFile(process.cwd() + "/public/index.html");
 });
@@ -19,9 +21,19 @@ app.get('/balls', (req, res) => {
         '../analyzer/images/' + filename,
     ]);
     react_to_process('BALLS', process, res);
-})
+});
 
+function start() {
+    loops.push(setInterval(async () => {
+        let process = spawn('../yolo')
+    }, 500));
+}
 
+function stop() {
+    for (let loop of loops) {
+        clearTimeout(loop);
+    }
+}
 
 
 app.get('/obstacles', (req, res) => {

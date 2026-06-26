@@ -1,14 +1,9 @@
-use image::{ImageReader, Rgb, RgbImage};
-use serde::Deserialize;
+use image::{Rgb, RgbImage};
+use opencv::{core, core::Mat, imgproc};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, error::Error};
 
-const RADIUS: i32 = 40;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-struct Position {
-    x: i32,
-    y: i32,
-}
+use crate::{Position, hex_to_rgb};
 
 enum Color {
     Ball,
@@ -20,13 +15,13 @@ enum Color {
     RouteChosen,
 }
 
-struct ObstacleBounds {
-    walls: Bounds,
-    cross: Bounds,
+pub struct ObstacleBounds {
+    pub walls: Bounds,
+    pub cross: Bounds,
 }
 
 #[derive(Debug)]
-struct Bounds {
+pub struct Bounds {
     min_x: i32,
     max_x: i32,
     min_y: i32,
@@ -34,8 +29,7 @@ struct Bounds {
 }
 
 
-
-fn bounds(points: &[Position]) -> Bounds {
+pub fn bounds(points: &[Position]) -> Bounds {
     Bounds {
         min_x: points.iter().map(|p| p.x).min().unwrap(),
         max_x: points.iter().map(|p| p.x).max().unwrap(),
@@ -44,105 +38,122 @@ fn bounds(points: &[Position]) -> Bounds {
     }
 }
 
-#[derive(Deserialize)]
-struct Obstacles {
-    walls: Vec<Position>,
-    cross: Vec<Position>,
+#[derive(Serialize)]
+pub struct Obstacles {
+    pub walls: Vec<Position>,
+    pub cross: Vec<Position>,
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let now = std::time::Instant::now();
 
-    // Load the DATA so far :)
-    let dyn_img = ImageReader::open("./scene.jpg")?.decode()?;
-    let mut img: RgbImage = dyn_img.to_rgb8();
+pub struct NextInstruction {
+    pub pos: Position,
+    pub route_lenth: usize,
+}
 
-    let balls_json = std::fs::read_to_string("./balls.json")?;
-    let obstacles_json = std::fs::read_to_string("./obstacles.json")?;
 
-    let balls: Vec<Position> = serde_json::from_str(&balls_json)?;
-    let obstacles: Obstacles = serde_json::from_str(&obstacles_json)?;
+pub fn next_point(car: &Position, route: &HashMap<Position, Node>) -> NextInstruction {
+    let lowest_node = route.iter().min_by_key(|(_, node)| node.f_cost()).unwrap();
 
-    let obst_bounds = ObstacleBounds {
-        cross: bounds(&obstacles.cross),
-        walls: bounds(&obstacles.walls),
-    };
+    let mut inspect_node = lowest_node.1.clone();
 
-    let car: Position = serde_json::from_str(
-        &std::fs::read_to_string("./car.json")?
-    )?;
-    draw_pixel(&mut img, &car, 40, Color::Car);
+    let mut pos = Vec::new();
 
-    // Calculate Route
-
-    // find den tætteste og planlæg rute
-    let ball = find_nearest_ball(&car, &balls).expect("Der burde være en bold!");
-    draw_pixel(&mut img, &ball, 20, Color::Debug);
-    let route = calc_route(&car, &ball, &obst_bounds);
-
-    // draw cross
-    // for x in obst_bounds.cross.min_x..=obst_bounds.cross.max_x {
-    //     for y in obst_bounds.cross.min_y..=obst_bounds.cross.max_y {
-    //         draw_pixel(&mut img, &Position { x, y }, 1, Color::Debug);
-    //     }
-    // }
-
-    // draw_route_map_debug(&mut img, &route);
-    draw_route_map_debug(&mut img, &route);
-    draw_route(&mut img, &route.1);
-
-    // draw balls
-    for ball in &balls {
-        draw_pixel(&mut img, ball, 10, Color::Ball);
+    while let Some(parent) = inspect_node.parent {
+        pos.push(parent);
+        let node = route.get(&parent).unwrap();
+        inspect_node = node.clone();
     }
 
-    img.save("map_computed.jpg")?;
-    println!("executed in: {}ms", now.elapsed().as_millis());
+    let point = match pos.len() {
+        0 => car.clone(),
+        1 => pos.first().unwrap().clone(),
+        2 => pos.iter().nth(0).unwrap().clone(),
+        3 => pos.iter().nth(0).unwrap().clone(),
+        4 => pos.iter().nth(0).unwrap().clone(),
+        5 => pos.iter().nth(0).unwrap().clone(),
+        _ => pos.iter().nth(pos.len()-5).unwrap().clone(),
+    };
 
-    Ok(())
+    return NextInstruction { pos: point, route_lenth: pos.len() }
 }
 
+
 #[derive(Clone)]
-struct Node {
-    g_cost: i32, // distance from starting node
-    h_cost: i32, // distance from end node
-    parent: Option<Position>,
+pub struct Node {
+    pub g_cost: i32, // distance from starting node
+    pub h_cost: i32, // distance from end node
+    pub parent: Option<Position>,
 }
 
 impl Node {
-    fn f_cost(&self) -> i32 {
+    pub fn f_cost(&self) -> i32 {
         self.g_cost + self.h_cost
     }
 }
 
-fn draw_route(img: &mut RgbImage, route: &HashMap<Position, Node>) {
-    // find the node with the lowest distance
+
+
+pub fn draw_route_stream(
+    frame: &mut Mat,
+    route: &HashMap<Position, Node>,
+) -> opencv::Result<()> {
+    // Find node with lowest cost
     let mut min_cost = i32::MAX;
-    let mut min_pos = None;
+    let mut min_pos: Option<Position> = None;
+
     for (pos, node) in route {
         if node.f_cost() < min_cost {
             min_cost = node.f_cost();
-            min_pos = Some(pos.clone());
+            min_pos = Some(*pos);
         }
     }
 
-    if let Some(pos) = min_pos {
-        println!("Found closest!");
-        draw_pixel(img, &pos, 20, Color::RouteOpen);
+    let color = [0u8, 255u8, 0u8]; // Green
 
-        let mut node: Node = route.get(&pos).unwrap().clone();
+    if let Some(pos) = min_pos {
+        imgproc::circle(
+            frame,
+            core::Point::new(pos.x, pos.y),
+            10,
+            core::Scalar::new(
+                color[2] as f64,
+                color[1] as f64,
+                color[0] as f64,
+                0.0,
+            ),
+            -1,
+            imgproc::LINE_8,
+            0,
+        )?;
+
+        let mut node = route.get(&pos).unwrap().clone();
+
         while let Some(parent) = node.parent {
-            draw_pixel(img, &parent, 7, Color::RouteChosen);
+            imgproc::circle(
+                frame,
+                core::Point::new(parent.x, parent.y),
+                7,
+                core::Scalar::new(
+                    color[2] as f64,
+                    color[1] as f64,
+                    color[0] as f64,
+                    0.0,
+                ),
+                -1,
+                imgproc::LINE_8,
+                0,
+            )?;
+
             node = route.get(&parent).unwrap().clone();
         }
     }
-    else {
-        println!("Could not find closest node?");
-    }
 
+    Ok(())
 }
 
-fn get_first_node(route: &HashMap<Position, Node>) -> Option<Position> {
+
+
+pub fn get_first_node(route: &HashMap<Position, Node>) -> Option<Position> {
     // find the node with the lowest distance
     let mut min_cost = i32::MAX;
     let mut min_pos = None;
@@ -166,33 +177,6 @@ fn get_first_node(route: &HashMap<Position, Node>) -> Option<Position> {
 
     panic!("No node");
 
-}
-
-fn draw_route_map_debug(img: &mut RgbImage, route: &(HashMap<Position, Node>, HashMap<Position, Node>)) {
-    for (pos, _) in &route.0 {
-        draw_pixel(
-            img,
-            pos,
-            3,
-            Color::RouteOpen,
-            // match node.open {
-                // true => Color::RouteOpen,
-                // false => Color::RouteClosed,
-            // },
-        );
-    }
-    for (pos, node) in &route.1 {
-        draw_pixel(
-            img,
-            pos,
-            3,
-            Color::RouteClosed,
-            // match node.open {
-                // true => Color::RouteOpen,
-                // false => Color::RouteClosed,
-            // },
-        );
-    }
 }
 
 pub fn calc_route(
@@ -309,13 +293,11 @@ pub fn calc_route(
     (open, closed)
 }
 
-
-
 fn dist_to_target(pos: &Position, target: &Position) -> i32 {
     (pos.x - target.x).pow(2) + (pos.y - target.y).pow(2)
 }
 
-fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Position> {
+pub fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Position> {
     let mut shortest: Option<Position> = None;
     let mut distance: Option<i32> = None;
 
@@ -334,32 +316,6 @@ fn find_nearest_ball(car: &Position, balls: &Vec<Position>) -> Option<Position> 
 
     shortest
 }
-
-fn draw_pixel(img: &mut RgbImage, pos: &Position, size: i32, color: Color) {
-    for x in pos.x - size..pos.x + size {
-        for y in pos.y - size..pos.y + size {
-            // skip the pixels that are outside
-            if x < 0 || y < 0 || x >= img.width() as i32 || y >= img.height() as i32 {
-                continue;
-            }
-
-            img.put_pixel(
-                x as u32,
-                y as u32,
-                match color {
-                    Color::Ball => Rgb([200, 150, 100]),
-                    Color::Car => Rgb([150, 200, 150]),
-                    Color::Obstacle => Rgb([100, 150, 200]),
-                    Color::Debug => Rgb([211, 176, 33]),
-                    Color::RouteOpen => Rgb([192, 132, 252]),
-                    Color::RouteClosed => Rgb([139, 92, 246]),
-                    Color::RouteChosen => Rgb([192, 170, 252]),
-                },
-            );
-        }
-    }
-}
-
 
 fn dist_to_rect(p: &Position, b: &Bounds) -> i32 {
     let dx = if p.x < b.min_x {
@@ -391,5 +347,5 @@ fn obstacle_penalty(dist_sq: i32, safety_radius: i32) -> i32 {
     let normalized =
         (safety_radius as f32 - dist) / safety_radius as f32;
 
-    (normalized.powf(4.0) * 50000.0) as i32
+    (normalized.powf(7.8) * 500000.0) as i32
 }
